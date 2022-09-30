@@ -1,0 +1,11 @@
+[package]
+name = "async-unsync"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["std"]
+std = []
+
+[dev-dependencies]
+futures-lite = "1.12.0"
