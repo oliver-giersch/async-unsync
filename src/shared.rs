@@ -262,7 +262,8 @@ pub(crate) struct Bounded {
 
 impl QueueBound for Bounded {
     fn reset(&mut self) {
-        // this should never underflow (TODO: check, then make a better comment)
+        // this can never underflow, because `permits` is never increased above
+        // the configured capacity
         let diff = self.capacity - self.semaphore.available_permits();
         self.semaphore.add_permits(diff);
     }
