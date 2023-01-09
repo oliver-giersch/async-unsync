@@ -1,3 +1,6 @@
+//! A simple async, unsync (!Sync) Semaphore for limiting and sequencing access
+//! to shared resources.
+
 use core::{
     cell::UnsafeCell,
     future::Future,
@@ -64,8 +67,7 @@ impl Semaphore {
     }
 }
 
-/// A permit representing access to the [`Semaphore`]'s guarded
-/// resource.
+/// A permit representing access to the [`Semaphore`]'s guarded resource.
 pub struct Permit<'a> {
     shared: &'a UnsafeCell<Shared>,
 }
@@ -142,7 +144,7 @@ struct Shared {
     waiters: VecDeque<(Waker, WaiterId)>,
     /// The pool of uniquely assigned waiter IDs.
     id_pool: WaiterId,
-    /// The number of ... (TODO)
+    /// The number of currently available permits.
     permits: usize,
 }
 
@@ -151,7 +153,10 @@ impl Shared {
     ///
     /// Guaranteed to wrap around on overflow.
     fn next_id(&mut self) -> WaiterId {
-        // TODO: double check there is no issue when overflowing
+        // this may overflow, but it *should* be impossible for this to cause
+        // ABA problem issues - there would have to be `usize::MAX + 1` queued
+        // wakers for there to be an overlap of IDs, which is not supported by
+        // the underlying data structure
         self.id_pool = self.id_pool.wrapping_add(1);
         self.id_pool
     }
@@ -172,15 +177,16 @@ impl Shared {
         }
     }
 
+    /// Attempts to reduce available permits by one or returns `false`.
     fn try_acquire_one(&mut self) -> bool {
-        if self.permits > 0 {
-            self.permits -= 1;
-            true
-        } else {
-            false
-        }
+        self.permits.checked_sub(1).map_or(false, |_| true)
     }
 
+    /// Polls the semaphore with a unique `id`.
+    ///
+    /// The given `waiting` state must be false on first poll. It will be set to
+    /// `true` when the semaphore registers the given `cx`'s [`Waker`] and
+    /// associates it with the given `id`.
     fn poll_acquire_one(
         &mut self,
         id: WaiterId,
@@ -189,21 +195,24 @@ impl Shared {
     ) -> Poll<()> {
         if !*waiting {
             // on first poll, check if there are enough permits or enqueue waker
-            if self.permits > 0 {
-                self.permits -= 1;
+            if self.try_acquire_one() {
                 Poll::Ready(())
             } else {
+                // if no permits are currently available, associate the waker
+                // with the ID and register both with the semaphore
                 self.waiters.push_back((cx.waker().clone(), id));
                 *waiting = true;
 
                 Poll::Pending
             }
         } else {
-            // check if polled by spurious wake
-            if !self.woken(id).is_woken() {
+            // check, if polled by spurious wake, i.e., if the waiter ID is
+            // still registered with the semaphore and has not yet been removed
+            if matches!(self.woken(id), WakeStatus::Waiting(_)) {
                 return Poll::Pending;
             }
 
+            // ...otherwise, the future can resolve
             Poll::Ready(())
         }
     }
@@ -212,12 +221,6 @@ impl Shared {
 enum WakeStatus {
     Woken,
     Waiting(usize),
-}
-
-impl WakeStatus {
-    fn is_woken(&self) -> bool {
-        matches!(self, Self::Woken)
-    }
 }
 
 #[cfg(test)]

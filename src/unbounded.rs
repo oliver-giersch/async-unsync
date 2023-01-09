@@ -78,10 +78,6 @@ impl<T> UnboundedChannel<T> {
     ///
     /// Fails, if the channel is [empty](TryRecvError::Empty) or
     /// [disconnected](TryRecvError::Disconnected).
-    ///
-    /// # Panics
-    ///
-    /// TODO...
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         self.shared.try_recv::<UNCOUNTED>()
     }
@@ -98,13 +94,26 @@ impl<T> UnboundedChannel<T> {
         self.shared.poll_recv::<UNCOUNTED>(cx)
     }
 
-    // NOTE: only one recv future should exist and be polled at the same time
+    /// Receives an element through the channel.
+    ///
+    /// # Errors
+    ///
+    /// Fails, if the channel is closed (i.e., all senders have been dropped).
     pub async fn recv(&self) -> Option<T> {
         self.shared.recv::<UNCOUNTED>().await
     }
 
     pub fn send(&self, elem: T) -> Result<(), SendError<T>> {
         self.shared.send::<UNCOUNTED>(elem)
+    }
+}
+
+impl<T> fmt::Debug for UnboundedChannel<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnboundedChannel")
+            .field("len", &self.len())
+            .field("is_closed", &self.is_closed())
+            .finish()
     }
 }
 
@@ -240,7 +249,7 @@ pub struct UnboundedReceiver<T> {
 
 impl<T> UnboundedReceiver<T> {
     /// Closes the channel causing all subsequent sends to fail.
-    pub fn close(&self) {
+    pub fn close(&mut self) {
         self.shared.close::<COUNTED>();
     }
 
@@ -259,7 +268,7 @@ impl<T> UnboundedReceiver<T> {
         self.shared.len() == 0
     }
 
-    /// Receives an element through the channel.
+    /// Attempts to receive an element through the channel.
     ///
     /// # Errors
     ///
@@ -280,7 +289,8 @@ impl<T> UnboundedReceiver<T> {
     ///
     /// # Errors
     ///
-    /// Fails, if the channel is closed (i.e., all senders have been dropped).
+    /// Fails, if the channel is [empty](TryRecvError::Empty) or
+    /// [disconnected](TryRecvError::Disconnected).
     pub async fn recv(&mut self) -> Option<T> {
         self.shared.recv::<COUNTED>().await
     }
@@ -292,6 +302,15 @@ impl<T> Drop for UnboundedReceiver<T> {
     }
 }
 
+impl<T> fmt::Debug for UnboundedReceiver<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnboundedReceiver")
+            .field("len", &self.len())
+            .field("is_closed", &self.is_closed())
+            .finish()
+    }
+}
+
 /// A borrowing handle for receiving elements through a split unbounded [`UnboundedChannel`].
 pub struct UnboundedReceiverRef<'a, T> {
     shared: &'a UnboundedShared<T>,
@@ -299,7 +318,7 @@ pub struct UnboundedReceiverRef<'a, T> {
 
 impl<T> UnboundedReceiverRef<'_, T> {
     /// Closes the channel causing all subsequent sends to fail.
-    pub fn close(&self) {
+    pub fn close(&mut self) {
         self.shared.close::<COUNTED>();
     }
 
@@ -346,6 +365,15 @@ impl<T> UnboundedReceiverRef<'_, T> {
 impl<T> Drop for UnboundedReceiverRef<'_, T> {
     fn drop(&mut self) {
         self.shared.close::<COUNTED>();
+    }
+}
+
+impl<T> fmt::Debug for UnboundedReceiverRef<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnboundedReceiverRef")
+            .field("len", &self.len())
+            .field("is_closed", &self.is_closed())
+            .finish()
     }
 }
 

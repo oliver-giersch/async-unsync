@@ -59,11 +59,11 @@ impl<T> error::Error for SendError<T> {}
 /// An error that occurred trying to receive on a closed or empty channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TryRecvError {
-    /// This **channel** is currently empty, but the **Sender**(s) have not yet disconnected,
-    /// so data may yet become available.
+    /// This **channel** is currently empty, but the **Sender**(s) have not yet
+    /// disconnected, so data may yet become available.
     Empty,
-    /// The **channel**’s sending half has become disconnected, and there will never be any more
-    /// data received on it.
+    /// The **channel**’s sending half has become disconnected, and there will
+    /// never be any more data received on it.
     Disconnected,
 }
 

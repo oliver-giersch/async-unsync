@@ -71,6 +71,7 @@ impl<T> UnsyncShared<T, Unbounded> {
             return Err(SendError(elem));
         }
 
+        // ..otherwise push `elem` and wake a potential waiter
         shared.push_and_wake(elem);
         Ok(())
     }

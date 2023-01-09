@@ -1,6 +1,9 @@
 //! A **bounded** MPSC channel implementation.
 
-use core::task::{Context, Poll};
+use core::{
+    fmt,
+    task::{Context, Poll},
+};
 
 use crate::{
     alloc::{collections::VecDeque, rc::Rc},
@@ -24,13 +27,15 @@ pub struct Channel<T> {
 }
 
 impl<T> Channel<T> {
-    /// Splits the channel into borrowing [`SenderRef`] and [`ReceiverRef`] handles.
+    /// Splits the channel into borrowing [`SenderRef`] and [`ReceiverRef`]
+    /// handles.
     pub fn split(&mut self) -> (SenderRef<'_, T>, ReceiverRef<'_, T>) {
         self.shared.0.get_mut().to_counted();
         (SenderRef { shared: &self.shared }, ReceiverRef { shared: &self.shared })
     }
 
-    /// Consumes and splits the channel into owning [`Sender`] and [`Receiver`] handles.
+    /// Consumes and splits the channel into owning [`Sender`] and [`Receiver`]
+    /// handles.
     pub fn into_split(mut self) -> (Sender<T>, Receiver<T>) {
         self.shared.0.get_mut().to_counted();
         let shared = Rc::new(self.shared);
@@ -49,8 +54,8 @@ impl<T> Channel<T> {
 
     /// Returns the number of available elements in the channel.
     ///
-    /// If this number is zero, any subsequent [`Self::send`]s will block until there is sufficient
-    /// capacity in the channel.
+    /// If this number is zero, any subsequent [`Self::send`]s will block until
+    /// there is sufficient capacity in the channel.
     pub fn available(&self) -> usize {
         self.shared.available()
     }
@@ -95,15 +100,11 @@ impl<T> Channel<T> {
         self.shared.poll_recv::<UNCOUNTED>(cx)
     }
 
-    /// ...
+    /// Receives an element through the channel.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// This may panic, if there are is more than one concurrent poll for
-    /// receiving (i.e. either directly through `poll_recv` or by the future
-    /// returned by `recv`) an element.
-    /// In order to avoid this, there should be only one logical receiver per
-    /// each channel.
+    /// Fails, if the channel is closed (i.e., all senders have been dropped).
     pub async fn recv(&self) -> Option<T> {
         self.shared.recv::<UNCOUNTED>().await
     }
@@ -119,7 +120,16 @@ impl<T> Channel<T> {
 
     /// Sends a value through the channel *regardless* of available capacity.
     ///
-    /// s
+    /// Unbounded sends will decrease the available capacity for bounded sends,
+    /// but are not themselves affected by it.
+    /// When an element is received through the channel, the available capacity
+    /// is incremented (although never above the initially specified limit),
+    /// regardless of whether elements were sent in a bounded or unbounded
+    /// manner.
+    /// Unbounded sends should thus be used carefully, as they can potentially
+    /// undermine assumptions about how much capacity is available.
+    /// In essence, they can be understood as a temporary, single-use increase
+    /// of the channel capacity by one.
     ///
     /// # Errors
     ///
@@ -128,8 +138,22 @@ impl<T> Channel<T> {
         self.shared.unbounded_send::<UNCOUNTED>(elem)
     }
 
+    /// Sends a value, potentially waiting until there is capacity.
+    ///
+    /// # Errors
+    ///
+    /// Fails, if the queue is closed.
     pub async fn send(&self, elem: T) -> Result<(), SendError<T>> {
         self.shared.send::<UNCOUNTED>(elem).await
+    }
+}
+
+impl<T> fmt::Debug for Channel<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Channel")
+            .field("len", &self.len())
+            .field("is_closed", &self.is_closed())
+            .finish()
     }
 }
 
@@ -146,7 +170,7 @@ impl<T> Sender<T> {
 
     /// Returns the number of available elements in the channel.
     ///
-    /// If this number is zero, any subsequent [`::send`](Sender::send)s will
+    /// If this number is zero, any subsequent [`send`](Sender::send)s will
     /// block until there is sufficient capacity in the channel.
     pub fn available(&self) -> usize {
         self.shared.available()
@@ -186,7 +210,7 @@ impl<T> Sender<T> {
         self.shared.try_send::<COUNTED>(elem)
     }
 
-    /// Sends a value through the channel, potentially blocking until there is
+    /// Sends a value through the channel, potentially waiting until there is
     /// sufficient capacity.
     ///
     /// # Errors
@@ -209,6 +233,15 @@ impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         // SAFETY: no mutable or aliased access to shared possible
         unsafe { (*self.shared.0.get()).mask.decrease_sender_count() };
+    }
+}
+
+impl<T> fmt::Debug for Sender<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sender")
+            .field("len", &self.len())
+            .field("is_closed", &self.is_closed())
+            .finish()
     }
 }
 
@@ -265,7 +298,8 @@ impl<T> SenderRef<'_, T> {
         self.shared.try_send::<COUNTED>(elem)
     }
 
-    /// Sends a value through the channel, potentially blocking until there is sufficient capacity.
+    /// Sends a value through the channel, potentially blocking until there is
+    /// sufficient capacity.
     ///
     /// # Errors
     ///
@@ -290,6 +324,15 @@ impl<T> Drop for SenderRef<'_, T> {
     }
 }
 
+impl<T> fmt::Debug for SenderRef<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SenderRef")
+            .field("len", &self.len())
+            .field("is_closed", &self.is_closed())
+            .finish()
+    }
+}
+
 /// An owning handle for receiving elements through a split bounded [`Channel`].
 pub struct Receiver<T> {
     shared: Rc<BoundedShared<T>>,
@@ -297,7 +340,7 @@ pub struct Receiver<T> {
 
 impl<T> Receiver<T> {
     /// Closes the channel causing all subsequent sends to fail.
-    pub fn close(&self) {
+    pub fn close(&mut self) {
         self.shared.close::<COUNTED>();
     }
 
@@ -306,12 +349,17 @@ impl<T> Receiver<T> {
         self.shared.len()
     }
 
+    /// Returns `true` if the channel is closed.
+    pub fn is_closed(&self) -> bool {
+        self.shared.is_closed::<COUNTED>()
+    }
+
     /// Returns `true` if the channel is empty.
     pub fn is_empty(&self) -> bool {
         self.shared.len() == 0
     }
 
-    /// Receives an element through the channel.
+    /// Attempts to receive an element through the channel.
     ///
     /// # Errors
     ///
@@ -321,8 +369,9 @@ impl<T> Receiver<T> {
         self.shared.try_recv::<COUNTED>()
     }
 
-    /// Polls the channel, resolving if an element was received or the channel is closed but
-    /// ignoring whether there are any remaining **Sender**(s) or not.
+    /// Polls the channel, resolving if an element was received or the channel
+    /// is closed but ignoring whether there are any remaining **Sender**(s) or
+    /// not.
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
         self.shared.poll_recv::<COUNTED>(cx)
     }
@@ -344,6 +393,15 @@ impl<T> Drop for Receiver<T> {
     }
 }
 
+impl<T> fmt::Debug for Receiver<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Receiver")
+            .field("len", &self.len())
+            .field("is_closed", &self.is_closed())
+            .finish()
+    }
+}
+
 /// A borrowing handle for receiving elements through a split bounded [`Channel`].
 pub struct ReceiverRef<'a, T> {
     shared: &'a BoundedShared<T>,
@@ -351,13 +409,18 @@ pub struct ReceiverRef<'a, T> {
 
 impl<T> ReceiverRef<'_, T> {
     /// Closes the channel causing all subsequent sends to fail.
-    pub fn close(&self) {
+    pub fn close(&mut self) {
         self.shared.close::<COUNTED>();
     }
 
     /// Returns the number of queued elements.
     pub fn len(&self) -> usize {
         self.shared.len()
+    }
+
+    /// Returns `true` if the channel is closed.
+    pub fn is_closed(&self) -> bool {
+        self.shared.is_closed::<COUNTED>()
     }
 
     /// Returns `true` if the channel is empty.
@@ -395,6 +458,15 @@ impl<T> ReceiverRef<'_, T> {
 impl<T> Drop for ReceiverRef<'_, T> {
     fn drop(&mut self) {
         self.shared.close::<COUNTED>();
+    }
+}
+
+impl<T> fmt::Debug for ReceiverRef<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReceiverRef")
+            .field("len", &self.len())
+            .field("is_closed", &self.is_closed())
+            .finish()
     }
 }
 
@@ -558,17 +630,25 @@ mod tests {
             let (tx, mut rx) = chan.split();
 
             tx.send(1).await.unwrap();
+            assert_eq!(tx.available(), 0);
             tx.unbounded_send(2).unwrap();
+            assert_eq!(tx.available(), 0);
+            tx.unbounded_send(3).unwrap();
+            assert_eq!(tx.available(), 0);
 
             assert_eq!(rx.recv().await, Some(1));
-            assert_eq!(rx.recv().await, Some(2));
-            assert!(tx.is_empty());
             assert_eq!(tx.available(), 1);
+            assert_eq!(rx.recv().await, Some(2));
+            assert_eq!(tx.available(), 1);
+            assert_eq!(rx.recv().await, Some(3));
+            assert_eq!(tx.available(), 1);
+
+            assert!(tx.is_empty());
         });
     }
 
     #[test]
-    fn bounded_vs_unbounded_send() {
+    fn bounded_vs_unbounded_send_2() {
         futures_lite::future::block_on(async {
             let mut chan = super::channel::<i32>(1);
             let (tx, mut rx) = chan.split();
