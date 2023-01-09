@@ -126,12 +126,15 @@ impl Drop for Acquire<'_> {
             // check, if there exists some entry in queue of waiters with the
             // same ID as this future
             if let WakeStatus::Waiting(pos) = shared.woken(self.id) {
-                // remove the enqueued waker
+                // remove the enqueued waiting waker and forget about it
                 let _ = shared.waiters.remove(pos).unwrap();
             } else {
                 // the waker has already been dequed but the future was not
                 // resolved (`waiting` was not reset to false!), so we either
                 // wake the next waiter in line or add back a permit
+                // NOTE: this can happen, if the waiting waker has already been
+                // dequeued and the waker woken, but the future has not been
+                // polled again before being dropped
                 shared.add_permit();
             }
         }
@@ -212,7 +215,10 @@ impl Shared {
                 return Poll::Pending;
             }
 
-            // ...otherwise, the future can resolve
+            // ...otherwise, the future can resolve, waiting must be set to
+            // `false` here, this prevents us from having to check the waiter
+            // queue again when the future is eventually dropped
+            *waiting = false;
             Poll::Ready(())
         }
     }

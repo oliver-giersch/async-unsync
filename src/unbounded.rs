@@ -103,6 +103,11 @@ impl<T> UnboundedChannel<T> {
         self.shared.recv::<UNCOUNTED>().await
     }
 
+    /// Sends a value through the channel.
+    ///
+    /// # Errors
+    ///
+    /// Fails, if the queue is closed.
     pub fn send(&self, elem: T) -> Result<(), SendError<T>> {
         self.shared.send::<UNCOUNTED>(elem)
     }

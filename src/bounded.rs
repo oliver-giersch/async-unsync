@@ -133,7 +133,7 @@ impl<T> Channel<T> {
     ///
     /// # Errors
     ///
-    /// Fails, if the queue is closed or there is no available capacity.
+    /// Fails, if the queue is closed.
     pub fn unbounded_send(&self, elem: T) -> Result<(), SendError<T>> {
         self.shared.unbounded_send::<UNCOUNTED>(elem)
     }
