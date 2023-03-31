@@ -11,7 +11,7 @@
 //!
 //! [1]: https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html
 
-#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(all(not(test), not(feature = "std")), no_std)]
 #![warn(clippy::inconsistent_struct_constructor)]
 #![warn(clippy::match_same_arms)]
 #![warn(clippy::missing_errors_doc)]
