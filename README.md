@@ -1,5 +1,8 @@
 # async-unsync - Single Threaded Async Channels
 
+[![Build Status](https://github.com/oliver-giersch/async-unsync/actions/workflows/rust.yml/badge.svg)](https://github.com/oliver-giersch/async-unsync/actions/workflows/rust.yml)
+[![crates.io](https://img.shields.io/crates/v/async-unsync.svg)](https://crates.io/crates/bstr)
+
 A Rust library for asynchronous but unsynchronized (single-threaded)
 communication primitives, primarily channels and semaphores with an API that is
 designed to be as similar to [`tokio::sync`][1] as possible.
