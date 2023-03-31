@@ -478,7 +478,7 @@ impl<T> Sender<T> {
     /// # }
     /// ```
     pub async fn reserve_owned(self) -> Result<OwnedPermit<T>, SendError<Self>> {
-        if let Err(_) = self.shared.reserve::<COUNTED>().await {
+        if self.shared.reserve::<COUNTED>().await.is_err() {
             return Err(SendError(self));
         }
 
@@ -607,7 +607,7 @@ impl<T> SenderRef<'_, T> {
     /// ```
     pub fn try_reserve(&self) -> Result<Permit<'_, T>, TrySendError<()>> {
         self.shared.try_reserve::<COUNTED>()?;
-        Ok(Permit { shared: &self.shared })
+        Ok(Permit { shared: self.shared })
     }
 
     /// Attempts to reserve a slot in the channel without blocking.
@@ -643,7 +643,7 @@ impl<T> SenderRef<'_, T> {
     /// ```
     pub async fn reserve(&self) -> Result<Permit<'_, T>, SendError<()>> {
         self.shared.reserve::<COUNTED>().await?;
-        Ok(Permit { shared: &self.shared })
+        Ok(Permit { shared: self.shared })
     }
 }
 

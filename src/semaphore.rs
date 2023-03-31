@@ -71,6 +71,10 @@ impl Semaphore {
 
     /// Acquires a [`Permit`] or returns [`None`] if there are no available
     /// permits.
+    /// 
+    /// # Errors
+    /// 
+    /// Fails, if the semaphore has been closed or has no available permits.
     pub fn try_acquire_one(&self) -> Result<Permit<'_>, TryAcquireError> {
         // SAFETY: no mutable or aliased access to shared possible
         unsafe { (*self.shared.get()).try_acquire_one() }.map(|_| self.make_permit())
@@ -78,6 +82,10 @@ impl Semaphore {
 
     /// Acquires a [`Permit`], potentially blocking the calling [`Future`] until
     /// one becomes available.
+    /// 
+    /// # Errors
+    /// 
+    /// Fails, if the semaphore has been closed.
     pub async fn acquire_one(&self) -> Result<Permit<'_>, AcquireError> {
         // SAFETY: no mutable or aliased access to shared possible
         let id = unsafe { (*self.shared.get()).next_id() };
