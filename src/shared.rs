@@ -157,11 +157,11 @@ impl<T> UnsyncShared<T, Bounded> {
 
     /// Performs a bounded send through the given `shared`.
     pub(crate) async fn send<const COUNTED: bool>(&self, elem: T) -> Result<(), SendError<T>> {
-        // SAFETY: no mutable or aliased access to shared possible
-        let shared = unsafe { &mut *self.0.get() };
-
         // try to acquire a free slot in the queue
-        let Ok(permit) = shared.extra.semaphore.acquire_one().await else {
+        let ptr = self.0.get();
+        // SAFETY: no mutable or aliased access to shared possible (a mutable
+        // reference **MUST NOT** be held across the await!)
+        let Ok(permit) = unsafe { (*ptr).extra.semaphore.acquire_one() }.await else {
             return Err(SendError(elem))
         };
 
@@ -170,7 +170,8 @@ impl<T> UnsyncShared<T, Bounded> {
         // The order, i.e., forget first, is somewhat important, because `wake`
         // might panic (which can be caught), but only after `elem` is pushed.
         permit.forget();
-        shared.push_and_wake(elem);
+        // SAFETY: no mutable or aliased access to shared possible
+        unsafe { (*ptr).push_and_wake(elem) };
 
         Ok(())
     }
@@ -193,11 +194,11 @@ impl<T> UnsyncShared<T, Bounded> {
     }
 
     pub(crate) async fn reserve<const COUNTED: bool>(&self) -> Result<(), SendError<()>> {
-        // SAFETY: no mutable or aliased access to shared possible
-        let shared = unsafe { &mut *self.0.get() };
-
         // acquire a free slot in the queue
-        let Ok(permit) = shared.extra.semaphore.acquire_one().await else {
+        let ptr = self.0.get();
+        // SAFETY: no mutable or aliased access to shared possible (a mutable
+        // reference **MUST NOT** be held across the await!)
+        let Ok(permit) = unsafe { (*ptr).extra.semaphore.acquire_one() }.await else {
             return Err(SendError(()))
         };
 
