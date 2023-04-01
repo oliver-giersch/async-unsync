@@ -497,7 +497,7 @@ impl<T> Clone for Sender<T> {
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.0.get()).mask.decrease_sender_count() };
+        unsafe { (*self.shared.0.get()).decrease_sender_count() };
     }
 }
 
@@ -658,7 +658,7 @@ impl<T> Clone for SenderRef<'_, T> {
 impl<T> Drop for SenderRef<'_, T> {
     fn drop(&mut self) {
         // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.0.get()).mask.decrease_sender_count() };
+        unsafe { (*self.shared.0.get()).decrease_sender_count() };
     }
 }
 

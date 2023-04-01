@@ -230,6 +230,14 @@ pub(crate) struct Shared<T, B = Unbounded> {
 }
 
 impl<T, B> Shared<T, B> {
+    pub(crate) fn decrease_sender_count(&mut self) {
+        if self.mask.decrease_sender_count() {
+            if let Some(waker) = self.waker.take() {
+                waker.wake();
+            }
+        }
+    }
+
     /// Pushes `elem` to the back of the queue and wakes the registered
     /// waker if set.
     fn push_and_wake(&mut self, elem: T) {
@@ -338,9 +346,9 @@ pub trait MaybeBoundedQueue {
     fn try_recv<const COUNTED: bool>(&mut self) -> Result<Self::Item, TryRecvError>;
 }
 
-pub struct Unbounded;
+pub(crate) struct Unbounded;
 
-pub struct Bounded {
+pub(crate) struct Bounded {
     /// The semaphore sequencing the blocked senders.
     semaphore: Semaphore,
     /// The channel's capacity.
