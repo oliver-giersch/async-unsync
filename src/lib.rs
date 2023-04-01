@@ -17,6 +17,7 @@
 #![warn(clippy::missing_errors_doc)]
 #![warn(clippy::missing_panics_doc)]
 #![warn(clippy::missing_safety_doc)]
+#![warn(clippy::undocumented_unsafe_blocks)]
 #![warn(missing_docs)]
 
 #[cfg(feature = "std")]
@@ -210,12 +211,23 @@ impl Mask {
     }
 
     // Decrements the sender count by one and closes the queue if it reaches zero.
-    fn decrease_sender_count(&mut self) {
+    #[must_use = "must react to final sender being dropped"]
+    fn decrease_sender_count(&mut self) -> bool {
         // can not underflow, count starts at 2 and is only incremented while
         // ensuring no overflow can occur
         self.0 -= 2;
-        if self.0 == 0 {
-            self.0 = 1;
+
+        // mask is 0 or 1: sender was last
+        if self.0 < 2 {
+            return self.set_closed_bit();
         }
+
+        false
+    }
+
+    #[cold]
+    fn set_closed_bit(&mut self) -> bool {
+        self.0 = 1;
+        true
     }
 }

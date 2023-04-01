@@ -497,7 +497,7 @@ impl<T> Clone for Sender<T> {
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.0.get()).mask.decrease_sender_count() };
+        unsafe { (*self.shared.0.get()).decrease_sender_count() };
     }
 }
 
@@ -658,7 +658,7 @@ impl<T> Clone for SenderRef<'_, T> {
 impl<T> Drop for SenderRef<'_, T> {
     fn drop(&mut self) {
         // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.0.get()).mask.decrease_sender_count() };
+        unsafe { (*self.shared.0.get()).decrease_sender_count() };
     }
 }
 
@@ -1058,7 +1058,8 @@ mod tests {
             assert_eq!(tx.capacity(), 0);
 
             // polling the second send first should still return pending, even
-            // though there is room in the queue
+            // though there is room in the queue, because the order has been
+            // established when the futures were first registered
             core::future::poll_fn(|cx| {
                 assert!(s2.as_mut().poll(cx).is_pending());
                 assert_eq!(s1.as_mut().poll(cx), Poll::Ready(Ok(())));

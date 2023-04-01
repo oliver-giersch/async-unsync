@@ -2,15 +2,15 @@
 //! to arbitrary shared resources.
 
 use core::{
-    cell::UnsafeCell,
+    cell::{Cell, UnsafeCell},
     fmt,
     future::Future,
-    mem,
+    marker::PhantomPinned,
+    mem::{self, MaybeUninit},
     pin::Pin,
+    ptr::{self, NonNull},
     task::{Context, Poll, Waker},
 };
-
-use crate::alloc::collections::VecDeque;
 
 /// An unsynchronized (`!Sync`), simple semaphore for asynchronous permit
 /// acquisition.
@@ -21,7 +21,9 @@ pub struct Semaphore {
 impl Semaphore {
     /// Creates a new semaphore with the initial number of permits.
     pub const fn new(permits: usize) -> Self {
-        Self { shared: UnsafeCell::new(Shared { waiters: VecDeque::new(), id_pool: 0, permits }) }
+        Self {
+            shared: UnsafeCell::new(Shared { waiters: WaiterQueue::new(), permits, closed: false }),
+        }
     }
 
     /// Closes the semaphore and returns the number of notified pending waiters.
@@ -55,11 +57,7 @@ impl Semaphore {
     /// Adds `n` new permits to the semaphore.
     pub fn add_permits(&self, n: usize) {
         // SAFETY: no mutable or aliased access to shared possible
-        let shared = unsafe { &mut (*self.shared.get()) };
-
-        for _ in 0..n {
-            shared.add_permit();
-        }
+        unsafe { (*self.shared.get()).add_permits(n) };
     }
 
     /// Permanently reduces the number of available permits by `n`.
@@ -71,33 +69,50 @@ impl Semaphore {
 
     /// Acquires a [`Permit`] or returns [`None`] if there are no available
     /// permits.
-    /// 
+    ///
     /// # Errors
-    /// 
+    ///
     /// Fails, if the semaphore has been closed or has no available permits.
     pub fn try_acquire_one(&self) -> Result<Permit<'_>, TryAcquireError> {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.get()).try_acquire_one() }.map(|_| self.make_permit())
+        self.try_acquire_many(1)
     }
 
     /// Acquires a [`Permit`], potentially blocking the calling [`Future`] until
     /// one becomes available.
-    /// 
+    ///
     /// # Errors
-    /// 
+    ///
     /// Fails, if the semaphore has been closed.
     pub async fn acquire_one(&self) -> Result<Permit<'_>, AcquireError> {
-        // SAFETY: no mutable or aliased access to shared possible
-        let id = unsafe { (*self.shared.get()).next_id() };
-        Acquire { shared: &self.shared, id, waiting: false }.await
+        let _ = self.acquire_inner(1).await?;
+        Ok(self.make_permit(1))
     }
 
     /// Returns a new `Permit` without actually acquiring it.
     ///
-    /// NOTE: Only use this to "revive" a Permit that has been explicity
+    /// NOTE: Only use this to "revive" a Permit that has been explicitly
     /// [forgotten](Permit::forget)!
-    pub(crate) fn make_permit(&self) -> Permit<'_> {
-        Permit { shared: &self.shared }
+    pub(crate) fn make_permit(&self, count: usize) -> Permit<'_> {
+        Permit { shared: &self.shared, count }
+    }
+
+    fn try_acquire_many(&self, n: usize) -> Result<Permit<'_>, TryAcquireError> {
+        // SAFETY: no mutable or aliased access to shared possible
+        unsafe { (*self.shared.get()).try_acquire::<true>(n) }.map(|_| self.make_permit(n))
+    }
+
+    fn acquire_inner(&self, wants: usize) -> Acquire<'_> {
+        Acquire {
+            shared: &self.shared,
+            inner: Waiter {
+                wants,
+                waker: LateInitWaker::new(),
+                waiting: Cell::new(false),
+                permits: Cell::new(0),
+                next: Cell::new(ptr::null()),
+                _pin: PhantomPinned,
+            },
+        }
     }
 }
 
@@ -114,6 +129,7 @@ impl fmt::Debug for Semaphore {
 /// A permit representing access to the [`Semaphore`]'s guarded resource.
 pub struct Permit<'a> {
     shared: &'a UnsafeCell<Shared>,
+    count: usize,
 }
 
 impl<'a> Permit<'a> {
@@ -128,7 +144,7 @@ impl<'a> Permit<'a> {
 impl Drop for Permit<'_> {
     fn drop(&mut self) {
         // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.get()).add_permit() };
+        unsafe { (*self.shared.get()).add_permits(self.count) };
     }
 }
 
@@ -183,31 +199,32 @@ impl fmt::Display for TryAcquireError {
 #[cfg(feature = "std")]
 impl std::error::Error for TryAcquireError {}
 
-type WaiterId = usize;
-
 /// The [`Future`] returned by [`acquire_one`](Semaphore::acquire_one), which
-/// resolves when a [`Permit`] becomes available.
+/// resolves when the required number of permits becomes available.
 struct Acquire<'a> {
     /// The shared [`Semaphore`] state.
     shared: &'a UnsafeCell<Shared>,
-    /// The ID for this future.
-    id: WaiterId,
-    /// The flag determining, whether this future has already been polled.
-    waiting: bool,
+    /// The state for waiting and resolving the future.
+    inner: Waiter,
 }
 
-impl<'a> Future for Acquire<'a> {
-    type Output = Result<Permit<'a>, AcquireError>;
+impl Future for Acquire<'_> {
+    type Output = Result<usize, AcquireError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let Self { shared, id, waiting } = self.get_mut();
-
+        let waiter = &self.inner;
         // SAFETY: no mutable or aliased access to shared possible
-        match unsafe { (*shared.get()).poll_acquire_one(*id, waiting, cx) } {
+        match unsafe { (*self.shared.get()).poll_acquire(waiter, cx) } {
             Poll::Ready(res) => {
-                *waiting = false;
+                // unconditionally setting waiting to false here avoids having
+                // to traverse the waiter queue again when the future is
+                // dropped.
+                waiter.waiting.set(false);
                 match res {
-                    Ok(_) => Poll::Ready(Ok(Permit { shared })),
+                    Ok(_) => {
+                        let count = waiter.permits.take();
+                        Poll::Ready(Ok(count))
+                    }
                     Err(e) => Poll::Ready(Err(e)),
                 }
             }
@@ -218,183 +235,360 @@ impl<'a> Future for Acquire<'a> {
 
 impl Drop for Acquire<'_> {
     fn drop(&mut self) {
-        // remove the queued waker, if it was already enqueued, otherwise, no
-        // action is required for cleanup
-        if self.waiting {
-            // SAFETY: no mutable or aliased access to shared possible
-            let shared = unsafe { &mut (*self.shared.get()) };
+        // SAFETY: no mutable or aliased access to shared possible
+        let shared = unsafe { &mut (*self.shared.get()) };
+
+        // remove the queued waker, if it was already enqueued
+        if self.inner.waiting.get() {
             // check, if there exists some entry in queue of waiters with the
             // same ID as this future
-            if let Some(pos) = shared.woken(self.id) {
-                // remove the enqueued waiting waker and forget about it
-                let _ = shared.waiters.remove(pos).unwrap();
-            } else {
-                // the waker has already been dequed but the future was not
-                // resolved (`waiting` was not reset to false!), so we either
-                // wake the next waiter in line or add back a permit
-                // NOTE: this can happen, if the waiting waker has already been
-                // dequeued and the waker woken, but the future has not been
-                // polled again before being dropped
-                shared.add_permit();
-            }
+            unsafe { shared.waiters.try_remove(&self.inner) };
         }
+
+        // return all "unused" (i.e., not passed on into a [`Permit`]) permits
+        // back to the semaphore
+        let permits = self.inner.permits.get();
+        shared.add_permits(permits);
     }
 }
 
 /// The shared [`Semaphore`] state.
 struct Shared {
     /// The queue of registered `Waker`s.
-    waiters: VecDeque<(Waker, WaiterId)>,
-    /// The pool of uniquely assigned waiter IDs.
-    ///
-    /// NOTE: The LSB is used as a flag bit determining if the semaphore has
-    /// been closed, so IDs always have to be incremented by 2.
-    id_pool: WaiterId,
+    waiters: WaiterQueue,
     /// The number of currently available permits.
     permits: usize,
+    /// The flag indicating if the semaphore has been closed.
+    closed: bool,
 }
 
 impl Shared {
+    /// Closes the semaphore and notifies all remaining waiters.
     fn close(&mut self) -> usize {
-        self.id_pool |= 0b1;
-        let waiters = self.waiters.len();
-        for (waker, _) in self.waiters.drain(..) {
-            waker.wake();
-        }
+        self.closed = true;
+        // FIXME
+        let waiting = unsafe { self.waiters.len() };
+        self.waiters = WaiterQueue::new();
 
-        waiters
+        waiting
     }
 
+    /// Returns `true` if the semaphore has been closed.
     fn is_closed(&self) -> bool {
-        self.id_pool & 0b1 != 0
+        self.closed
     }
 
-    /// Returns the next ID from the pool.
-    ///
-    /// Guaranteed to wrap around on overflow.
-    fn next_id(&mut self) -> WaiterId {
-        let id = self.id_pool & (usize::MAX - 1);
+    /// Adds `n` permits and wakes all waiters whose requests can now be
+    /// completed.
+    fn add_permits(&mut self, mut n: usize) {
+        while n > 0 {
+            // keep checking the waiter queue until are permits are distributed
+            if let Some(waiter) = unsafe { self.waiters.front() } {
+                // SAFETY: FIXME
+                let waiter = unsafe { waiter.as_ref() };
+                // check, how many permits have already been assigned and
+                // how many were requested
+                let diff = waiter.wants - waiter.permits.get();
+                if diff > n {
+                    // waiter wants more permits than are still available
+                    // the waiter gets all available permits & the loop
+                    // terminated (n = 0)
+                    waiter.permits.set(diff - n);
+                    return;
+                } else {
+                    // the waiters request can be completed, assign all
+                    // missing permits, wake the waiter, continue the loop
+                    waiter.permits.set(waiter.wants);
+                    n -= diff;
 
-        // this may overflow, but it *should* be impossible for this to cause
-        // ABA problem issues - there would have to be `usize::MAX + 1` queued
-        // wakers for there to be an overlap of IDs, which is not supported by
-        // the underlying data structure (see [`Vec::with_capacity`])
-        self.id_pool = self.id_pool.wrapping_add(2);
-        id
-    }
-
-    /// Returns the current position in the queue of waites for the given `id`
-    /// or [`None`], if the waiter has already been woken.
-    fn woken(&self, id: WaiterId) -> Option<usize> {
-        self.waiters.iter().position(|(_, i)| id == *i)
-    }
-
-    /// Wakes the next waiter in line or returns a single permit.
-    fn add_permit(&mut self) {
-        match self.waiters.pop_front() {
-            Some((waker, _)) => waker.wake(),
-            None => self.permits += 1,
+                    // SAFETY: All wakers are initialized when the `Waiter`s
+                    // are enqueued.
+                    unsafe {
+                        waiter.waker.get().wake_by_ref();
+                        // ...finally, dequeue the notified waker
+                        self.waiters.pop_front(waiter);
+                    };
+                }
+            } else {
+                self.permits = self.permits.saturating_add(n);
+                return;
+            }
         }
     }
 
-    /// Attempts to reduce available permits by one or returns `false`, if there
-    /// are no available permits.
-    fn try_acquire_one(&mut self) -> Result<(), TryAcquireError> {
+    /// Attempts to reduce available permits by up to `n` or returns an error,
+    /// if the semaphore has been closed or has no available permits.
+    fn try_acquire<const STRICT: bool>(&mut self, n: usize) -> Result<usize, TryAcquireError> {
         if self.is_closed() {
             return Err(TryAcquireError::Closed);
         }
 
-        match self.permits.checked_sub(1) {
-            Some(res) => {
-                self.permits = res;
-                Ok(())
+        if n > self.permits {
+            if STRICT || self.permits == 0 {
+                return Err(TryAcquireError::NoPermits);
             }
-            None => Err(TryAcquireError::NoPermits),
+
+            // hand out all available permits
+            let count = self.permits;
+            self.permits = 0;
+            Ok(count)
+        } else {
+            // can not underflow because n <= permits
+            self.permits -= n;
+            Ok(n)
         }
     }
 
-    /// Polls the semaphore with a unique `id`.
-    ///
-    /// The given `waiting` state must be false on first poll. It will be set to
-    /// `true` when the semaphore registers the given `cx`'s [`Waker`] and
-    /// associates it with the given `id`.
-    fn poll_acquire_one(
+    fn poll_acquire(
         &mut self,
-        id: WaiterId,
-        waiting: &mut bool,
+        waiter: &Waiter,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), AcquireError>> {
-        if !*waiting {
-            // on first poll, check if there are enough permits or enqueue waker
-            match self.try_acquire_one() {
-                Ok(_) => Poll::Ready(Ok(())),
-                Err(TryAcquireError::Closed) => Poll::Ready(Err(AcquireError(()))),
-                Err(TryAcquireError::NoPermits) => {
-                    // if no permits are currently available, associate the
-                    // waker with the ID and register both with the semaphore
-                    self.waiters.push_back((cx.waker().clone(), id));
-                    *waiting = true;
+        // on first poll, check if there are enough permits to resolve
+        // immediately or enqueue a waiter ticket to be notified (i.e. polled
+        // again) later
+        if !waiter.waiting.get() {
+            return self.poll_acquire_initial(waiter, cx);
+        }
 
-                    Poll::Pending
+        /*
+         * on any subsequent poll (which may be spurious!), the following
+         * conditions must be checked:
+         *
+         *   1. has the semaphore been closed in the meantime?
+         *   2. is a waiter for this request still enqueued? (this will occur
+         *      frequently with spurious polls)
+         */
+
+        if self.is_closed() {
+            // a waiter *may* or *may not* be in the queue, but `Acquire::drop`
+            // will take care of this eventually
+            return Poll::Ready(Err(AcquireError(())));
+        }
+
+        /*
+         * check, if the waiter is still enqueued in the `waiters` queue, in
+         * which case the poll must be spurious, since any poll caused by a
+         * deliberate wake-call would have been preceded by removing the ticket
+         * from the queue
+         */
+
+        // SAFETY: The `AcquireState`s are part of each `Acquire` future and
+        // thus share the same lifetime. When such a future is dropped, it will
+        // make sure to remove itself from this list. Should a future be
+        // "forgotten" it either exists on the heap and its memory location will
+        // remain valid or, if it exists on the stack, it can't actually be
+        // leaked, since it has to be pinned before it can insert itself into
+        // the list
+        if unsafe { self.waiters.contains(waiter) } {
+            return Poll::Pending;
+        }
+
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_acquire_initial(
+        &mut self,
+        waiter: &Waiter,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), AcquireError>> {
+        match self.try_acquire::<false>(waiter.wants) {
+            Ok(n) => {
+                // check if we got the desired amount or less
+                waiter.permits.set(n);
+                if n == waiter.wants {
+                    return Poll::Ready(Ok(()));
                 }
             }
-        } else {
-            // check, if the semaphore has been closed
-            if self.is_closed() {
-                *waiting = false;
-                return Poll::Ready(Err(AcquireError(())));
-            }
+            Err(TryAcquireError::Closed) => return Poll::Ready(Err(AcquireError(()))),
+            _ => {}
+        };
 
-            // check, if polled by spurious wake, i.e., if the waiter ID is
-            // still registered with the semaphore and has not yet been removed
-            if self.woken(id).is_some() {
-                return Poll::Pending;
-            }
+        // if no or not enough permits are currently available, enqueue a
+        // waiter request ticket, to be notified when capacity becomes
+        // available
+        waiter.waiting.set(true);
+        waiter.waker.set(cx.waker().clone());
+        // SAFETY: (FIXME)
+        unsafe { self.waiters.push_back(waiter) }
 
-            // ...otherwise, the future can resolve, waiting must be set to
-            // `false` here, this prevents us from having to check the waiter
-            // queue again when the future is eventually dropped
-            *waiting = false;
-            Poll::Ready(Ok(()))
+        return Poll::Pending;
+    }
+}
+
+struct WaiterQueue {
+    head: *const Waiter,
+    tail: *const Waiter,
+}
+
+impl WaiterQueue {
+    const fn new() -> Self {
+        Self { head: ptr::null(), tail: ptr::null() }
+    }
+
+    unsafe fn len(&self) -> usize {
+        let mut curr = self.head;
+        let mut waiting = 0;
+        while !curr.is_null() {
+            curr = unsafe { (*curr).next.get() };
+            waiting += 1;
         }
+
+        waiting
+    }
+
+    unsafe fn contains(&self, waiter: *const Waiter) -> bool {
+        let mut curr = self.head;
+        while !curr.is_null() {
+            if curr == waiter {
+                return true;
+            }
+
+            let next = unsafe { (*curr).next.get() };
+            curr = next;
+        }
+
+        false
+    }
+
+    unsafe fn push_back(&mut self, waiter: *const Waiter) {
+        if self.tail.is_null() {
+            // queue is empty, insert waiter at head
+            self.head = waiter;
+            self.tail = waiter;
+        } else {
+            // queue is not empty, insert at tail
+            unsafe { (*self.tail).next.set(waiter) };
+            self.tail = waiter;
+        }
+    }
+
+    unsafe fn try_remove(&mut self, waiter: *const Waiter) {
+        let mut pred = Cell::from_mut(&mut self.head);
+        while !pred.get().is_null() {
+            let curr = pred.get();
+            let next = unsafe { &(*curr).next };
+            if curr == waiter {
+                pred.set(next.get());
+
+                // if the last waiter is removed, tail must also become `null`
+                if self.head.is_null() {
+                    self.tail = ptr::null();
+                }
+
+                return;
+            }
+
+            pred = next;
+        }
+    }
+
+    unsafe fn front(&self) -> Option<NonNull<Waiter>> {
+        NonNull::new(self.head as *mut Waiter)
+    }
+
+    unsafe fn pop_front(&mut self, head: &Waiter) {
+        self.head = head.next.get();
+        if self.head.is_null() {
+            self.tail = ptr::null();
+        }
+    }
+}
+
+/// A queue-able waiter that will be notified, when its requested number of
+/// semaphore permits has been granted.
+struct Waiter {
+    /// The number of requested permits.
+    wants: usize,
+    /// The waker to be woken if the future is enqueued as waiting.
+    ///
+    /// This field is **never** used, if the waiter does not get enqueued,
+    /// because its request can be fulfilled immediately.
+    waker: LateInitWaker,
+    /// The flag determining, whether this future has already been polled.
+    waiting: Cell<bool>,
+    /// The counter of already collected permits.
+    permits: Cell<usize>,
+    /// The pointer to the next enqueued waiter
+    next: Cell<*const Self>,
+    // see: https://gist.github.com/Darksonn/1567538f56af1a8038ecc3c664a42462
+    // this marker lets miri pass the self-referential nature of this struct
+    _pin: PhantomPinned,
+}
+
+/// The `Waker` in an `Acquire` future is only used in case it gets enqueued
+/// in the `waiters` list or not at all.
+///
+/// `get` is only called during traversal of that list, so it is guaranteed to
+/// have been initialized
+struct LateInitWaker(UnsafeCell<MaybeUninit<Waker>>);
+
+impl LateInitWaker {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(MaybeUninit::uninit()))
+    }
+
+    fn set(&self, waker: Waker) {
+        unsafe { (*self.0.get()).as_mut_ptr().write(waker) };
+    }
+
+    unsafe fn get(&self) -> &Waker {
+        unsafe { (*self.0.get()).assume_init_ref() }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use core::{future::Future as _, task::Poll};
+    use futures_lite::future;
+
+    use core::{
+        future::Future as _,
+        ptr,
+        task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
+    };
 
     use crate::alloc::boxed::Box;
 
-    use super::Semaphore;
+    #[test]
+    fn try_acquire_one() {
+        let sem = super::Semaphore::new(0);
+        assert!(sem.try_acquire_one().is_err());
+        sem.add_permits(2);
+        let p1 = sem.try_acquire_one().unwrap();
+        let p2 = sem.try_acquire_one().unwrap();
+        assert_eq!(sem.available_permits(), 0);
+
+        drop((p1, p2));
+        assert_eq!(sem.available_permits(), 2);
+    }
 
     #[test]
-    fn id_pool() {
-        let mut shared = super::Shared {
-            waiters: crate::alloc::collections::VecDeque::new(),
-            id_pool: 0,
-            permits: 1,
-        };
-
-        shared.close();
-        assert_eq!(shared.next_id(), 0);
-        assert_eq!(shared.next_id(), 2);
-        assert_eq!(shared.next_id(), 4);
+    fn try_acquire_many() {
+        let sem = super::Semaphore::new(0);
+        assert!(sem.try_acquire_many(3).is_err());
+        sem.add_permits(2);
+        assert!(sem.try_acquire_many(3).is_err());
+        sem.add_permits(1);
+        let permit = sem.try_acquire_many(3).unwrap();
+        assert_eq!(permit.count, 3);
+        drop(permit);
+        assert_eq!(sem.available_permits(), 3);
     }
 
     #[test]
     fn acquire_one() {
-        futures_lite::future::block_on(async {
-            let sem = Semaphore::new(0);
-            let fut = sem.acquire_one();
-            futures_lite::pin!(fut);
+        future::block_on(async {
+            let sem = super::Semaphore::new(0);
+            let mut fut = core::pin::pin!(sem.acquire_one());
 
             let permit = core::future::poll_fn(|cx| {
                 assert!(fut.as_mut().poll(cx).is_pending());
+                assert_eq!(sem.waiters(), 1);
                 sem.add_permits(2);
                 fut.as_mut().poll(cx)
             })
-            .await;
+            .await
+            .unwrap();
 
             assert_eq!(sem.available_permits(), 1);
             drop(permit);
@@ -403,30 +597,62 @@ mod tests {
     }
 
     #[test]
+    fn poll_future() {
+        static RAW_VTABLE: RawWakerVTable = RawWakerVTable::new(
+            |_| RawWaker::new(ptr::null(), &RAW_VTABLE),
+            |_| {},
+            |_| {},
+            |_| {},
+        );
+
+        let waker = unsafe { Waker::from_raw(RawWaker::new(ptr::null(), &RAW_VTABLE)) };
+        let mut cx = Context::from_waker(&waker);
+
+        let sem = super::Semaphore::new(0);
+        let mut fut = Box::pin(sem.acquire_inner(1));
+
+        assert!(fut.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(sem.waiters(), 1);
+        sem.add_permits(1);
+
+        assert!(fut.as_mut().poll(&mut cx).is_ready());
+        drop(fut);
+        assert_eq!(sem.waiters(), 0);
+    }
+
+    #[test]
     fn acquire_two() {
-        futures_lite::future::block_on(async {
-            let sem = Semaphore::new(0);
+        future::block_on(async {
+            let sem = super::Semaphore::new(0);
+            let mut fut1 = Box::pin(sem.acquire_one());
+            let mut fut2 = Box::pin(sem.acquire_one());
 
-            let fut1 = sem.acquire_one();
-            let fut2 = sem.acquire_one();
-            futures_lite::pin!(fut1, fut2);
-
-            core::future::poll_fn(|cx| {
+            let permit = core::future::poll_fn(|cx| {
                 // poll both futures once to establish order
                 assert!(fut1.as_mut().poll(cx).is_pending());
                 assert!(fut2.as_mut().poll(cx).is_pending());
 
+                assert_eq!(sem.waiters(), 2);
                 sem.add_permits(1);
 
                 // due to established order, fut2 must not resolve before fut1
                 assert!(fut2.as_mut().poll(cx).is_pending());
                 // fut1 should resolve and the permit dropped right away,
                 // allowing fut2 to resolve as well
-                assert!(fut1.as_mut().poll(cx).is_ready());
-                assert!(fut2.as_mut().poll(cx).is_ready());
-                Poll::Ready(())
+                let res = fut1.as_mut().poll(cx);
+                assert!(res.is_ready());
+                assert_eq!(sem.waiters(), 1);
+                res
             })
-            .await;
+            .await
+            .unwrap();
+
+            drop(permit);
+            assert_eq!(sem.waiters(), 0);
+
+            let permit = fut2.await.unwrap();
+            assert_eq!(sem.available_permits(), 0);
+            drop(permit);
 
             assert_eq!(sem.available_permits(), 1);
         });
@@ -434,12 +660,12 @@ mod tests {
 
     #[test]
     fn cleanup() {
-        futures_lite::future::block_on(async {
-            let sem = Semaphore::new(0);
+        future::block_on(async {
+            let sem = super::Semaphore::new(0);
             let mut fut = Box::pin(sem.acquire_one());
 
+            // poll once to enqueue the future as waiting
             core::future::poll_fn(|cx| {
-                // poll once to enque the future as waiting
                 assert!(fut.as_mut().poll(cx).is_pending());
                 Poll::Ready(())
             })
@@ -447,16 +673,14 @@ mod tests {
 
             // dropping the future should clear up its queue entry
             drop(fut);
-
-            let waiters = unsafe { (*sem.shared.get()).waiters.len() };
-            assert_eq!(waiters, 0);
+            assert_eq!(sem.waiters(), 0);
         });
     }
 
     #[test]
     fn cleanup_after_wake() {
-        futures_lite::future::block_on(async {
-            let sem = Semaphore::new(0);
+        future::block_on(async {
+            let sem = super::Semaphore::new(0);
             let mut fut = Box::pin(sem.acquire_one());
 
             core::future::poll_fn(|cx| {
@@ -480,8 +704,8 @@ mod tests {
 
     #[test]
     fn close() {
-        futures_lite::future::block_on(async {
-            let sem = Semaphore::new(1);
+        future::block_on(async {
+            let sem = super::Semaphore::new(1);
             let permit = sem.acquire_one().await.unwrap();
 
             let mut fut = Box::pin(sem.acquire_one());
@@ -513,6 +737,97 @@ mod tests {
             // no further permits can be acquired
             assert!(sem.try_acquire_one().is_err());
             assert!(sem.acquire_one().await.is_err());
+        });
+    }
+
+    #[test]
+    fn return_outstanding_permit_on_close() {
+        future::block_on(async {
+            let sem = super::Semaphore::new(1);
+            let permit = sem.acquire_one().await.unwrap();
+
+            let mut fut = Box::pin(sem.acquire_one());
+            assert!(future::poll_once(&mut fut).await.is_none());
+            assert_eq!(sem.waiters(), 1);
+
+            // dropping a permit will transfer it to the next waiter, waking it
+            drop(permit);
+            assert_eq!(sem.waiters(), 0);
+            assert_eq!(sem.available_permits(), 0);
+
+            // closing by itself will not return the outstanding permit
+            sem.close();
+            assert_eq!(sem.available_permits(), 0);
+
+            // ... but awaiting the Acquire future should!
+            assert!(fut.await.is_err());
+            assert_eq!(sem.available_permits(), 1);
+        });
+    }
+
+    #[test]
+    fn return_outstanding_permit_on_cancel() {
+        future::block_on(async {
+            let sem = super::Semaphore::new(0);
+
+            let mut fut = Box::pin(sem.acquire_one());
+            assert!(future::poll_once(&mut fut).await.is_none());
+            assert_eq!(sem.waiters(), 1);
+
+            sem.add_permits(1);
+            assert_eq!(sem.waiters(), 0);
+
+            // dropping the unresolved future must return the already
+            // transferred permit ownership back to the semaphore
+            drop(fut);
+
+            assert_eq!(sem.waiters(), 0);
+            assert_eq!(sem.available_permits(), 1);
+        });
+    }
+
+    #[test]
+    fn forget_acquire_future() {
+        future::block_on(async {
+            async fn acquire_and_forget(sem: &super::Semaphore) {
+                let waiters = sem.waiters();
+                let mut fut = std::pin::pin!(sem.acquire_one());
+                assert!(future::poll_once(&mut fut).await.is_none());
+                assert_eq!(sem.waiters(), waiters + 1);
+
+                // this will not leak the future itself, but only the pinned
+                // reference to it, so the actual future will still be dropped
+                // correctly
+                std::mem::forget(fut);
+            }
+
+            let sem = super::Semaphore::new(0);
+            acquire_and_forget(&sem).await;
+            assert_eq!(sem.waiters(), 0);
+
+            // trash previously used stack space
+            let mut arr = [0u8; 1000];
+            for v in &mut arr {
+                *v = 255;
+            }
+
+            let mut f1 = std::pin::pin!(sem.acquire_one());
+            assert!(future::poll_once(&mut f1).await.is_none());
+            let mut f2 = std::pin::pin!(sem.acquire_one());
+            assert!(future::poll_once(&mut f2).await.is_none());
+            let mut f3 = std::pin::pin!(sem.acquire_one());
+            assert!(future::poll_once(&mut f3).await.is_none());
+
+            assert_eq!(sem.waiters(), 3);
+            assert_eq!(sem.available_permits(), 0);
+            sem.add_permits(3);
+
+            assert!(matches!(future::poll_once(&mut f1).await, Some(Ok(_))));
+            assert!(matches!(future::poll_once(&mut f2).await, Some(Ok(_))));
+            assert!(matches!(future::poll_once(&mut f3).await, Some(Ok(_))));
+
+            assert_eq!(sem.waiters(), 0);
+            assert_eq!(sem.available_permits(), 3);
         });
     }
 }
