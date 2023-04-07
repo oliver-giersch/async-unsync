@@ -195,7 +195,7 @@ impl<T> UnsyncShared<T, Bounded> {
 
     pub(crate) fn unreserve(&self) {
         // SAFETY: no mutable or aliased access to shared possible
-        drop(unsafe { (*self.0.get()).extra.semaphore.make_permit() });
+        drop(unsafe { (*self.0.get()).extra.semaphore.make_permit(1) });
     }
 }
 

@@ -17,6 +17,7 @@
 #![warn(clippy::missing_errors_doc)]
 #![warn(clippy::missing_panics_doc)]
 #![warn(clippy::missing_safety_doc)]
+#![warn(clippy::undocumented_unsafe_blocks)]
 #![warn(missing_docs)]
 
 #[cfg(feature = "std")]

@@ -1058,7 +1058,8 @@ mod tests {
             assert_eq!(tx.capacity(), 0);
 
             // polling the second send first should still return pending, even
-            // though there is room in the queue
+            // though there is room in the queue, because the order has been
+            // established when the futures were first registered
             core::future::poll_fn(|cx| {
                 assert!(s2.as_mut().poll(cx).is_pending());
                 assert_eq!(s1.as_mut().poll(cx), Poll::Ready(Ok(())));
