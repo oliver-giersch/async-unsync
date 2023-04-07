@@ -57,21 +57,11 @@ where
 
 impl<T> UnsyncShared<T, Unbounded> {
     pub(crate) const fn new() -> Self {
-        Self(UnsafeCell::new(Shared {
-            mask: Mask::new(),
-            queue: VecDeque::new(),
-            waker: None,
-            extra: Unbounded,
-        }))
+        Self(UnsafeCell::new(Shared::new(VecDeque::new(), Unbounded)))
     }
 
     pub(crate) fn with_capacity(capacity: usize) -> Self {
-        Self(UnsafeCell::new(Shared {
-            mask: Mask::new(),
-            queue: VecDeque::with_capacity(capacity),
-            waker: None,
-            extra: Unbounded,
-        }))
+        Self(UnsafeCell::new(Shared::new(VecDeque::with_capacity(capacity), Unbounded)))
     }
 
     pub(crate) fn send<const COUNTED: bool>(&self, elem: T) -> Result<(), SendError<T>> {
@@ -91,33 +81,24 @@ impl<T> UnsyncShared<T, Unbounded> {
 
 impl<T> FromIterator<T> for UnsyncShared<T, Unbounded> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        Self(UnsafeCell::new(Shared {
-            mask: Mask::new(),
-            queue: VecDeque::from_iter(iter),
-            waker: None,
-            extra: Unbounded,
-        }))
+        Self(UnsafeCell::new(Shared::new(VecDeque::from_iter(iter), Unbounded)))
     }
 }
 
 impl<T> UnsyncShared<T, Bounded> {
     pub(crate) const fn new(capacity: usize) -> Self {
-        Self(UnsafeCell::new(Shared {
-            mask: Mask::new(),
-            queue: VecDeque::new(),
-            waker: None,
-            extra: Bounded { semaphore: Semaphore::new(capacity), max_capacity: capacity },
-        }))
+        Self(UnsafeCell::new(Shared::new(
+            VecDeque::new(),
+            Bounded { semaphore: Semaphore::new(capacity), max_capacity: capacity },
+        )))
     }
 
     pub(crate) fn with_capacity(capacity: usize, initial: usize) -> Self {
         let initial = core::cmp::max(capacity, initial);
-        Self(UnsafeCell::new(Shared {
-            mask: Mask::new(),
-            queue: VecDeque::with_capacity(initial),
-            waker: None,
-            extra: Bounded { semaphore: Semaphore::new(capacity), max_capacity: capacity },
-        }))
+        Self(UnsafeCell::new(Shared::new(
+            VecDeque::with_capacity(initial),
+            Bounded { semaphore: Semaphore::new(capacity), max_capacity: capacity },
+        )))
     }
 
     pub(crate) fn max_capacity(&self) -> usize {
@@ -223,6 +204,8 @@ pub(crate) struct Shared<T, B = Unbounded> {
     pub(crate) mask: Mask,
     /// The queue storing each element sent through the channel
     queue: VecDeque<T>,
+    /// The current count of pop operations since the last reset.
+    pop_count: usize,
     /// The waker for the receiver.
     waker: Option<Waker>,
     /// Extra state for bounded or unbounded specialization.
@@ -238,6 +221,10 @@ impl<T, B> Shared<T, B> {
         }
     }
 
+    const fn new(queue: VecDeque<T>, extra: B) -> Self {
+        Shared { mask: Mask::new(), queue, pop_count: 0, waker: None, extra }
+    }
+
     /// Pushes `elem` to the back of the queue and wakes the registered
     /// waker if set.
     fn push_and_wake(&mut self, elem: T) {
@@ -245,6 +232,41 @@ impl<T, B> Shared<T, B> {
         if let Some(waker) = &self.waker {
             waker.wake_by_ref();
         }
+    }
+
+    /// Pops the first element in the queue and checks if the queue's capacity
+    /// should be shrunk.
+    fn pop_front(&mut self) -> Option<T> {
+        match self.queue.pop_front() {
+            Some(elem) => {
+                // check every 4k ops, if the queue can be shrunk
+                self.pop_count += 1;
+                if self.pop_count == 4096 {
+                    self.try_shrink_queue();
+                }
+
+                Some(elem)
+            }
+            None => {
+                // when the queue first becomes empty, try to shrink it once.
+                if self.pop_count > 0 {
+                    self.try_shrink_queue();
+                }
+
+                None
+            }
+        }
+    }
+
+    /// Shrinks the queue's capacity to `length + 32` if current capacity is
+    /// at least 4 times that.
+    fn try_shrink_queue(&mut self) {
+        let target_capacity = self.queue.len() + 32;
+        if self.queue.capacity() / 4 > (target_capacity) {
+            self.queue.shrink_to(target_capacity);
+        }
+
+        self.pop_count = 0;
     }
 }
 
@@ -288,7 +310,7 @@ impl<T> MaybeBoundedQueue for Shared<T, Unbounded> {
     }
 
     fn try_recv<const COUNTED: bool>(&mut self) -> Result<Self::Item, TryRecvError> {
-        match self.queue.pop_front() {
+        match self.pop_front() {
             Some(elem) => Ok(elem),
             // the channel is empty, but may also have been closed already
             None => match self.mask.is_closed::<COUNTED>() {
@@ -316,7 +338,7 @@ impl<T> MaybeBoundedQueue for Shared<T, Bounded> {
     }
 
     fn try_recv<const COUNTED: bool>(&mut self) -> Result<Self::Item, TryRecvError> {
-        match self.queue.pop_front() {
+        match self.pop_front() {
             // an element exists in the channel, wake the next blocked
             // sender, if any, and return the element
             Some(elem) => {
