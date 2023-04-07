@@ -3,3 +3,10 @@
 ## Release `0.1.0`
 
 - initial release
+
+## Release `0.1.1`
+
+- Fixes closing behavior of `Semaphore`: Acquired `Permit`s were not (always)
+  returned to the `Semaphore`.
+- Fixes closing behavior of `mpsc` Senders: Closing or dropping the last sender
+  would not wake up a waiting receiver.
