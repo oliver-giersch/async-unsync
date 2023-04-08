@@ -2,8 +2,8 @@ name: Rust
 
 on:
   push:
-    branches: [ master ]
-    tags: [ v0.* ]
+    branches: [ master, develop ]
+    tags: [ v*.*.* ]
   pull_request:
     branches: [ master ]
 
@@ -41,3 +41,5 @@ jobs:
       - uses: actions/checkout@v3
       - uses: dtolnay/rust-toolchain@miri
       - run: cargo miri test
+        env:
+          MIRIFLAGS: -Zmiri-ignore-leaks

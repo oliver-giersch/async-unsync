@@ -166,8 +166,10 @@ where
 /// This receiver implements [`Future`] and can be awaited directly:
 ///
 /// ```
+/// use async_unsync::oneshot;
+///
 /// # async fn example_receiver() {
-/// let (tx, rx) = async_unsync::oneshot::channel().into_split();
+/// let (tx, rx) = oneshot::channel().into_split();
 /// tx.send(()).unwrap();
 /// let _ = rx.await;
 /// # }
@@ -383,9 +385,13 @@ impl<T> Shared<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::{future::Future as _, task::Poll};
+
+    use futures_lite::future;
+
     #[test]
     fn recv() {
-        futures_lite::future::block_on(async {
+        future::block_on(async {
             let mut chan = super::channel::<i32>();
             let (tx, rx) = chan.split();
 
@@ -396,7 +402,7 @@ mod tests {
 
     #[test]
     fn split_twice() {
-        futures_lite::future::block_on(async {
+        future::block_on(async {
             let mut chan = super::channel::<()>();
             let (tx, rx) = chan.split();
 
@@ -406,6 +412,32 @@ mod tests {
             let (tx, rx) = chan.split();
             assert!(tx.send(()).is_err());
             assert!(rx.await.is_err());
+        });
+    }
+
+    #[test]
+    fn wake_on_close() {
+        future::block_on(async {
+            let mut chan = super::channel::<i32>();
+            let (tx, mut rx) = chan.split();
+            let mut rx = core::pin::pin!(rx);
+
+            // poll once: pending
+            core::future::poll_fn(|cx| {
+                assert!(rx.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+
+            // drop tx & close channel
+            drop(tx);
+
+            // receiver should return ready + error
+            core::future::poll_fn(move |cx| {
+                assert!(rx.as_mut().poll(cx).is_ready());
+                Poll::Ready(())
+            })
+            .await;
         });
     }
 }
