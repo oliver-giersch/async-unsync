@@ -1,10 +1,10 @@
-use async_unsync::bounded;
-use futures_lite::future;
-
+#[cfg(feature = "alloc")]
 #[test]
 fn mpsc() {
+    use futures_lite::future;
+
     future::block_on(async {
-        let mut chan = bounded::channel(1);
+        let mut chan = async_unsync::bounded::channel(1);
         let (tx, mut rx) = chan.split();
 
         let f1 = future::zip(push_loop(tx.clone(), 1), push_loop(tx, 2));
@@ -25,7 +25,8 @@ fn mpsc() {
     })
 }
 
-async fn push_loop(tx: bounded::SenderRef<'_, i32>, id: i32) {
+#[cfg(feature = "alloc")]
+async fn push_loop(tx: async_unsync::bounded::SenderRef<'_, i32>, id: i32) {
     let mut count = 0;
     while let Ok(_) = tx.send(id).await {
         futures_lite::future::yield_now().await;

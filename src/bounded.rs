@@ -7,8 +7,9 @@ use core::{
 
 use crate::{
     alloc::{collections::VecDeque, rc::Rc},
+    error::{SendError, TryRecvError, TrySendError},
+    mask::{COUNTED, UNCOUNTED},
     shared::BoundedShared,
-    SendError, TryRecvError, TrySendError, COUNTED, UNCOUNTED,
 };
 
 /// Creates a new bounded channel with the given `capacity`.

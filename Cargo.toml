@@ -1,7 +1,7 @@
 [package]
 name = "async-unsync"
 description = "asynchronous, unsynchronized (thread-local) channels and semaphores"
-version = "0.1.1"
+version = "0.2.0"
 authors = ["Oliver Giersch"]
 license = "MIT/Apache-2.0"
 repository = "https://github.com/oliver-giersch/async-unsync.git"
@@ -12,7 +12,8 @@ exclude = [".github"]
 
 [features]
 default = ["std"]
-std = []
+std = ["alloc"]
+alloc = []
 
 [dev-dependencies]
 futures-lite = "1.12.0"

@@ -6,7 +6,10 @@ use core::{
 };
 
 use crate::{
-    alloc::collections::VecDeque, semaphore::Semaphore, Mask, SendError, TryRecvError, TrySendError,
+    alloc::collections::VecDeque,
+    error::{SendError, TryRecvError, TrySendError},
+    mask::Mask,
+    semaphore::Semaphore,
 };
 
 /// Specialization of `UnsyncShared` for bounded queues.
@@ -121,7 +124,7 @@ impl<T> UnsyncShared<T, Bounded> {
         let shared = unsafe { &mut *self.0.get() };
 
         // check if there is room in the channel and the channel is still open
-        let permit = match shared.extra.semaphore.try_acquire_one() {
+        let permit = match shared.extra.semaphore.try_acquire() {
             Ok(permit) => permit,
             Err(e) => return Err((e, elem).into()),
         };
@@ -142,7 +145,7 @@ impl<T> UnsyncShared<T, Bounded> {
         let ptr = self.0.get();
         // SAFETY: no mutable or aliased access to shared possible (a mutable
         // reference **MUST NOT** be held across the await!)
-        let Ok(permit) = unsafe { (*ptr).extra.semaphore.acquire_one() }.await else {
+        let Ok(permit) = unsafe { (*ptr).extra.semaphore.acquire() }.await else {
             return Err(SendError(elem))
         };
 
@@ -162,7 +165,7 @@ impl<T> UnsyncShared<T, Bounded> {
         let shared = unsafe { &mut *self.0.get() };
 
         // check if there is room in the channel and the channel is still open
-        let permit = shared.extra.semaphore.try_acquire_one()?;
+        let permit = shared.extra.semaphore.try_acquire()?;
 
         // Forgetting the permit permanently decreases the number of
         // available permits. This (semaphore) permit is later "revived"
@@ -179,7 +182,7 @@ impl<T> UnsyncShared<T, Bounded> {
         let ptr = self.0.get();
         // SAFETY: no mutable or aliased access to shared possible (a mutable
         // reference **MUST NOT** be held across the await!)
-        let Ok(permit) = unsafe { (*ptr).extra.semaphore.acquire_one() }.await else {
+        let Ok(permit) = unsafe { (*ptr).extra.semaphore.acquire() }.await else {
             return Err(SendError(()))
         };
 
@@ -277,7 +280,7 @@ where
     pub(crate) fn set_counted(&mut self) {
         self.reset();
         self.waker = None;
-        self.mask.reset::<{ crate::COUNTED }>();
+        self.mask.reset::<{ crate::mask::COUNTED }>();
     }
 
     pub(crate) fn poll_recv<const COUNTED: bool>(

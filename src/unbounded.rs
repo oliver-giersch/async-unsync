@@ -7,8 +7,9 @@ use core::{
 
 use crate::{
     alloc::{collections::VecDeque, rc::Rc},
+    error::{SendError, TryRecvError},
+    mask::{COUNTED, UNCOUNTED},
     shared::UnboundedShared,
-    SendError, TryRecvError, COUNTED, UNCOUNTED,
 };
 
 /// Returns a new unbounded channel.

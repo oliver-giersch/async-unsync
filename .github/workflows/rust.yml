@@ -34,6 +34,9 @@ jobs:
           toolchain: ${{ matrix.rust }}
       - run: cargo test --verbose
       - run: cargo test --verbose --no-default-features
+      - run: cargo test --verbose --no-default-features --features alloc
+      - run: cargo test --verbose --no-default-features --features alloc,std
+      - run: cargo test --verbose --no-default-features --features std
 
   miri:
     runs-on: ubuntu-latest

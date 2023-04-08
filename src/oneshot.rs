@@ -8,7 +8,10 @@ use core::{
     task::{Context, Poll, Waker},
 };
 
-use crate::{alloc::rc::Rc, SendError, TryRecvError};
+use crate::{
+    alloc::rc::Rc,
+    error::{SendError, TryRecvError},
+};
 
 /// Creates a new oneshot channel.
 pub const fn channel<T>() -> OneshotChannel<T> {

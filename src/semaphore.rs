@@ -67,25 +67,47 @@ impl Semaphore {
         shared.permits = shared.permits.saturating_sub(n);
     }
 
-    /// Acquires a [`Permit`] or returns [`None`] if there are no available
-    /// permits.
+    /// Acquires a single [`Permit`] or returns an [error](TryAcquireError), if
+    /// there are no available permits.
     ///
     /// # Errors
     ///
     /// Fails, if the semaphore has been closed or has no available permits.
-    pub fn try_acquire_one(&self) -> Result<Permit<'_>, TryAcquireError> {
+    pub fn try_acquire(&self) -> Result<Permit<'_>, TryAcquireError> {
         self.try_acquire_many(1)
     }
 
-    /// Acquires a [`Permit`], potentially blocking the calling [`Future`] until
-    /// one becomes available.
+    /// Acquires `n` [`Permit`]s or returns an [error](TryAcquireError), if
+    /// there are not enough available permits.
+    ///
+    /// # Errors
+    ///
+    /// Fails, if the semaphore has been closed or has not enough available
+    /// permits.
+    pub fn try_acquire_many(&self, n: usize) -> Result<Permit<'_>, TryAcquireError> {
+        // SAFETY: no mutable or aliased access to shared possible
+        unsafe { (*self.shared.get()).try_acquire::<true>(n) }.map(|_| self.make_permit(n))
+    }
+
+    /// Acquires a single [`Permit`], potentially blocking until one becomes
+    /// available.
     ///
     /// # Errors
     ///
     /// Fails, if the semaphore has been closed.
-    pub async fn acquire_one(&self) -> Result<Permit<'_>, AcquireError> {
-        let _ = self.acquire_inner(1).await?;
-        Ok(self.make_permit(1))
+    pub async fn acquire(&self) -> Result<Permit<'_>, AcquireError> {
+        self.acquire_many(1).await
+    }
+
+    /// Acquires `n` [`Permit`]s, potentially blocking until they become
+    /// available.
+    ///
+    /// # Errors
+    ///
+    /// Fails, if the semaphore has been closed.
+    pub async fn acquire_many(&self, n: usize) -> Result<Permit<'_>, AcquireError> {
+        let _ = self.build_acquire(n).await?;
+        Ok(self.make_permit(n))
     }
 
     /// Returns a new `Permit` without actually acquiring it.
@@ -96,12 +118,7 @@ impl Semaphore {
         Permit { shared: &self.shared, count }
     }
 
-    fn try_acquire_many(&self, n: usize) -> Result<Permit<'_>, TryAcquireError> {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.get()).try_acquire::<true>(n) }.map(|_| self.make_permit(n))
-    }
-
-    fn acquire_inner(&self, wants: usize) -> Acquire<'_> {
+    fn build_acquire(&self, wants: usize) -> Acquire<'_> {
         Acquire {
             shared: &self.shared,
             inner: Waiter {
@@ -178,7 +195,8 @@ pub enum TryAcquireError {
     NoPermits,
 }
 
-impl From<TryAcquireError> for crate::TrySendError<()> {
+#[cfg(feature = "alloc")]
+impl From<TryAcquireError> for crate::error::TrySendError<()> {
     fn from(err: TryAcquireError) -> Self {
         match err {
             TryAcquireError::Closed => Self::Closed(()),
@@ -199,7 +217,7 @@ impl fmt::Display for TryAcquireError {
 #[cfg(feature = "std")]
 impl std::error::Error for TryAcquireError {}
 
-/// The [`Future`] returned by [`acquire_one`](Semaphore::acquire_one), which
+/// The [`Future`] returned by [`acquire`](Semaphore::acquire), which
 /// resolves when the required number of permits becomes available.
 struct Acquire<'a> {
     /// The shared [`Semaphore`] state.
@@ -547,15 +565,13 @@ mod tests {
         task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
     };
 
-    use crate::alloc::boxed::Box;
-
     #[test]
     fn try_acquire_one() {
         let sem = super::Semaphore::new(0);
-        assert!(sem.try_acquire_one().is_err());
+        assert!(sem.try_acquire().is_err());
         sem.add_permits(2);
-        let p1 = sem.try_acquire_one().unwrap();
-        let p2 = sem.try_acquire_one().unwrap();
+        let p1 = sem.try_acquire().unwrap();
+        let p2 = sem.try_acquire().unwrap();
         assert_eq!(sem.available_permits(), 0);
 
         drop((p1, p2));
@@ -579,7 +595,7 @@ mod tests {
     fn acquire_one() {
         future::block_on(async {
             let sem = super::Semaphore::new(0);
-            let mut fut = core::pin::pin!(sem.acquire_one());
+            let mut fut = core::pin::pin!(sem.acquire());
 
             let permit = core::future::poll_fn(|cx| {
                 assert!(fut.as_mut().poll(cx).is_pending());
@@ -609,7 +625,7 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         let sem = super::Semaphore::new(0);
-        let mut fut = Box::pin(sem.acquire_inner(1));
+        let mut fut = Box::pin(sem.build_acquire(1));
 
         assert!(fut.as_mut().poll(&mut cx).is_pending());
         assert_eq!(sem.waiters(), 1);
@@ -624,8 +640,8 @@ mod tests {
     fn acquire_two() {
         future::block_on(async {
             let sem = super::Semaphore::new(0);
-            let mut fut1 = Box::pin(sem.acquire_one());
-            let mut fut2 = Box::pin(sem.acquire_one());
+            let mut fut1 = Box::pin(sem.acquire());
+            let mut fut2 = Box::pin(sem.acquire());
 
             let permit = core::future::poll_fn(|cx| {
                 // poll both futures once to establish order
@@ -662,7 +678,7 @@ mod tests {
     fn cleanup() {
         future::block_on(async {
             let sem = super::Semaphore::new(0);
-            let mut fut = Box::pin(sem.acquire_one());
+            let mut fut = Box::pin(sem.acquire());
 
             // poll once to enqueue the future as waiting
             core::future::poll_fn(|cx| {
@@ -681,7 +697,7 @@ mod tests {
     fn cleanup_after_wake() {
         future::block_on(async {
             let sem = super::Semaphore::new(0);
-            let mut fut = Box::pin(sem.acquire_one());
+            let mut fut = Box::pin(sem.acquire());
 
             core::future::poll_fn(|cx| {
                 // poll once to enque the future as waiting
@@ -706,9 +722,9 @@ mod tests {
     fn close() {
         future::block_on(async {
             let sem = super::Semaphore::new(1);
-            let permit = sem.acquire_one().await.unwrap();
+            let permit = sem.acquire().await.unwrap();
 
-            let mut fut = Box::pin(sem.acquire_one());
+            let mut fut = Box::pin(sem.acquire());
             core::future::poll_fn(|cx| {
                 // poll once to enque the future as waiting
                 assert!(fut.as_mut().poll(cx).is_pending());
@@ -735,8 +751,8 @@ mod tests {
             assert_eq!(sem.available_permits(), 1);
 
             // no further permits can be acquired
-            assert!(sem.try_acquire_one().is_err());
-            assert!(sem.acquire_one().await.is_err());
+            assert!(sem.try_acquire().is_err());
+            assert!(sem.acquire().await.is_err());
         });
     }
 
@@ -744,9 +760,9 @@ mod tests {
     fn return_outstanding_permit_on_close() {
         future::block_on(async {
             let sem = super::Semaphore::new(1);
-            let permit = sem.acquire_one().await.unwrap();
+            let permit = sem.acquire().await.unwrap();
 
-            let mut fut = Box::pin(sem.acquire_one());
+            let mut fut = Box::pin(sem.acquire());
             assert!(future::poll_once(&mut fut).await.is_none());
             assert_eq!(sem.waiters(), 1);
 
@@ -770,7 +786,7 @@ mod tests {
         future::block_on(async {
             let sem = super::Semaphore::new(0);
 
-            let mut fut = Box::pin(sem.acquire_one());
+            let mut fut = Box::pin(sem.acquire());
             assert!(future::poll_once(&mut fut).await.is_none());
             assert_eq!(sem.waiters(), 1);
 
@@ -791,7 +807,7 @@ mod tests {
         future::block_on(async {
             async fn acquire_and_forget(sem: &super::Semaphore) {
                 let waiters = sem.waiters();
-                let mut fut = std::pin::pin!(sem.acquire_one());
+                let mut fut = std::pin::pin!(sem.acquire());
                 assert!(future::poll_once(&mut fut).await.is_none());
                 assert_eq!(sem.waiters(), waiters + 1);
 
@@ -811,11 +827,11 @@ mod tests {
                 *v = 255;
             }
 
-            let mut f1 = std::pin::pin!(sem.acquire_one());
+            let mut f1 = std::pin::pin!(sem.acquire());
             assert!(future::poll_once(&mut f1).await.is_none());
-            let mut f2 = std::pin::pin!(sem.acquire_one());
+            let mut f2 = std::pin::pin!(sem.acquire());
             assert!(future::poll_once(&mut f2).await.is_none());
-            let mut f3 = std::pin::pin!(sem.acquire_one());
+            let mut f3 = std::pin::pin!(sem.acquire());
             assert!(future::poll_once(&mut f3).await.is_none());
 
             assert_eq!(sem.waiters(), 3);
