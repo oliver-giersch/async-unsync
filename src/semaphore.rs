@@ -121,7 +121,7 @@ impl Semaphore {
     fn build_acquire(&self, wants: usize) -> Acquire<'_> {
         Acquire {
             shared: &self.shared,
-            inner: Waiter {
+            waiter: Waiter {
                 wants,
                 waker: LateInitWaker::new(),
                 waiting: Cell::new(false),
@@ -223,14 +223,16 @@ struct Acquire<'a> {
     /// The shared [`Semaphore`] state.
     shared: &'a UnsafeCell<Shared>,
     /// The state for waiting and resolving the future.
-    inner: Waiter,
+    waiter: Waiter,
 }
 
 impl Future for Acquire<'_> {
     type Output = Result<usize, AcquireError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let waiter = &self.inner;
+        // SAFETY: The `Acquire` future can not be moved before being dropped
+        let waiter = unsafe { Pin::map_unchecked(self.as_ref(), |acquire| &acquire.waiter) };
+
         // SAFETY: no mutable or aliased access to shared possible
         match unsafe { (*self.shared.get()).poll_acquire(waiter, cx) } {
             Poll::Ready(res) => {
@@ -257,15 +259,15 @@ impl Drop for Acquire<'_> {
         let shared = unsafe { &mut (*self.shared.get()) };
 
         // remove the queued waker, if it was already enqueued
-        if self.inner.waiting.get() {
+        if self.waiter.waiting.get() {
             // check, if there exists some entry in queue of waiters with the
             // same ID as this future
-            unsafe { shared.waiters.try_remove(&self.inner) };
+            unsafe { shared.waiters.try_remove(&self.waiter) };
         }
 
         // return all "unused" (i.e., not passed on into a [`Permit`]) permits
         // back to the semaphore
-        let permits = self.inner.permits.get();
+        let permits = self.waiter.permits.get();
         shared.add_permits(permits);
     }
 }
@@ -284,7 +286,7 @@ impl Shared {
     /// Closes the semaphore and notifies all remaining waiters.
     fn close(&mut self) -> usize {
         self.closed = true;
-        // FIXME
+        // SAFETY: All waiters remain valid while they are enqueued
         let waiting = unsafe { self.waiters.len() };
         self.waiters = WaiterQueue::new();
 
@@ -301,8 +303,8 @@ impl Shared {
     fn add_permits(&mut self, mut n: usize) {
         while n > 0 {
             // keep checking the waiter queue until are permits are distributed
-            if let Some(waiter) = unsafe { self.waiters.front() } {
-                // SAFETY: FIXME
+            if let Some(waiter) = self.waiters.front() {
+                // SAFETY: All waiters remain valid while they are enqueued.
                 let waiter = unsafe { waiter.as_ref() };
                 // check, how many permits have already been assigned and
                 // how many were requested
@@ -320,7 +322,8 @@ impl Shared {
                     n -= diff;
 
                     // SAFETY: All wakers are initialized when the `Waiter`s
-                    // are enqueued.
+                    // are enqueued and all waiters remain valid while they are
+                    // enqueued.
                     unsafe {
                         waiter.waker.get().wake_by_ref();
                         // ...finally, dequeue the notified waker
@@ -359,7 +362,7 @@ impl Shared {
 
     fn poll_acquire(
         &mut self,
-        waiter: &Waiter,
+        waiter: Pin<&Waiter>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), AcquireError>> {
         // on first poll, check if there are enough permits to resolve
@@ -398,7 +401,7 @@ impl Shared {
         // remain valid or, if it exists on the stack, it can't actually be
         // leaked, since it has to be pinned before it can insert itself into
         // the list
-        if unsafe { self.waiters.contains(waiter) } {
+        if unsafe { self.waiters.contains(waiter.get_ref()) } {
             return Poll::Pending;
         }
 
@@ -407,7 +410,7 @@ impl Shared {
 
     fn poll_acquire_initial(
         &mut self,
-        waiter: &Waiter,
+        waiter: Pin<&Waiter>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), AcquireError>> {
         match self.try_acquire::<false>(waiter.wants) {
@@ -427,8 +430,23 @@ impl Shared {
         // available
         waiter.waiting.set(true);
         waiter.waker.set(cx.waker().clone());
-        // SAFETY: (FIXME)
-        unsafe { self.waiters.push_back(waiter) }
+        // SAFETY: All waiters remain valid while they are enqueued.
+        //
+        // Each `Acquire` future contains/owns a `Waiter` and may either live on
+        // the stack or the heap.
+        // Each future must be pinned before it can be polled and therefore both
+        // the future and the waiter will remain in-place for their entire
+        // lifetime.
+        // When the future/waiter are cancelled or dropped, they will dequeue
+        // themselves to ensure no iteration over freed data is possible.
+        // Since they must be pinned, leaking or "forgetting" the futures does
+        // not break this invariant:
+        // In case of a heap-pinned future, the destructor will not be run, but
+        // the data will still remain valid for the program duration.
+        // In case of a future safely pinned to the stack, there is no way to
+        // actually prevent the destructor from running, since only the pinned
+        // reference can be leaked.
+        unsafe { self.waiters.push_back(waiter.get_ref()) }
 
         return Poll::Pending;
     }
@@ -440,10 +458,21 @@ struct WaiterQueue {
 }
 
 impl WaiterQueue {
+    /// Returns a new empty queue.
     const fn new() -> Self {
         Self { head: ptr::null(), tail: ptr::null() }
     }
 
+    /// Returns the first `Waiter` of `null`, if the queue is empty.
+    fn front(&self) -> Option<NonNull<Waiter>> {
+        NonNull::new(self.head as *mut Waiter)
+    }
+
+    /// Returns the number of currently enqueued `Waiter`s.
+    ///
+    /// # Safety
+    ///
+    /// All pointers must reference valid, live and non-aliased `Waiter`s.
     unsafe fn len(&self) -> usize {
         let mut curr = self.head;
         let mut waiting = 0;
@@ -455,6 +484,11 @@ impl WaiterQueue {
         waiting
     }
 
+    /// Returns `true` if the queue contains `waiter`.
+    ///
+    /// # Safety
+    ///
+    /// All pointers must reference valid, live and non-aliased `Waiter`s.
     unsafe fn contains(&self, waiter: *const Waiter) -> bool {
         let mut curr = self.head;
         while !curr.is_null() {
@@ -469,6 +503,11 @@ impl WaiterQueue {
         false
     }
 
+    /// Enqueues `waiter` at the back of the queue.
+    ///
+    /// # Safety
+    ///
+    /// All pointers must reference valid, live and non-aliased `Waiter`s.
     unsafe fn push_back(&mut self, waiter: *const Waiter) {
         if self.tail.is_null() {
             // queue is empty, insert waiter at head
@@ -481,6 +520,11 @@ impl WaiterQueue {
         }
     }
 
+    /// Searches for `waiter` in the queue and removes it if found.
+    ///
+    /// # Safety
+    ///
+    /// All pointers must reference valid, live and non-aliased `Waiter`s.
     unsafe fn try_remove(&mut self, waiter: *const Waiter) {
         let mut pred = Cell::from_mut(&mut self.head);
         while !pred.get().is_null() {
@@ -501,10 +545,12 @@ impl WaiterQueue {
         }
     }
 
-    unsafe fn front(&self) -> Option<NonNull<Waiter>> {
-        NonNull::new(self.head as *mut Waiter)
-    }
-
+    /// Removes `head` from the front of the queue.
+    ///
+    /// # Safety
+    ///
+    /// All pointers must reference valid, live and non-aliased `Waiter`s and
+    /// `head` must be the current queue head.
     unsafe fn pop_front(&mut self, head: &Waiter) {
         self.head = head.next.get();
         if self.head.is_null() {
