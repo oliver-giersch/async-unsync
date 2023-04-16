@@ -8,10 +8,10 @@ use core::{
     task::{Context, Poll, Waker},
 };
 
-use crate::{
-    alloc::rc::Rc,
-    error::{SendError, TryRecvError},
-};
+#[cfg(feature = "alloc")]
+use crate::alloc::rc::Rc;
+
+use crate::error::{SendError, TryRecvError};
 
 /// Creates a new oneshot channel.
 pub const fn channel<T>() -> OneshotChannel<T> {
@@ -41,6 +41,7 @@ impl<T> OneshotChannel<T> {
         (SenderRef { shared }, ReceiverRef { shared })
     }
 
+    #[cfg(feature = "alloc")]
     /// Splits the channel into owning [`Sender`] and
     /// [`Receiver`] handles.
     ///
@@ -53,11 +54,13 @@ impl<T> OneshotChannel<T> {
     }
 }
 
+#[cfg(feature = "alloc")]
 /// An owning handle for sending an element through a split [`OneshotChannel`].
 pub struct Sender<T> {
     shared: Rc<UnsafeCell<Shared<T>>>,
 }
 
+#[cfg(feature = "alloc")]
 impl<T> Sender<T> {
     /// Returns `true` if the channel has been closed.
     pub fn is_closed(&self) -> bool {
@@ -87,6 +90,7 @@ impl<T> Sender<T> {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         // SAFETY: no mutable or aliased access to shared possible
@@ -94,6 +98,7 @@ impl<T> Drop for Sender<T> {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl<T> fmt::Debug for Sender<T>
 where
     T: fmt::Debug,
@@ -164,6 +169,7 @@ where
     }
 }
 
+#[cfg(feature = "alloc")]
 /// An owning handle for receiving elements through a split [`OneshotChannel`].
 ///
 /// This receiver implements [`Future`] and can be awaited directly:
@@ -181,6 +187,7 @@ pub struct Receiver<T> {
     shared: Rc<UnsafeCell<Shared<T>>>,
 }
 
+#[cfg(feature = "alloc")]
 impl<T> Receiver<T> {
     /// Returns `true` if the channel has been closed.
     pub fn is_closed(&self) -> bool {
@@ -209,6 +216,7 @@ impl<T> Receiver<T> {
 }
 
 // Receiver implements Future, so it can be awaited directly.
+#[cfg(feature = "alloc")]
 impl<T> Future for Receiver<T> {
     type Output = Result<T, RecvError>;
 
@@ -218,12 +226,14 @@ impl<T> Future for Receiver<T> {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         self.close();
     }
 }
 
+#[cfg(feature = "alloc")]
 impl<T> fmt::Debug for Receiver<T>
 where
     T: fmt::Debug,

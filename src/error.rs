@@ -80,6 +80,7 @@ impl<T> TrySendError<T> {
         matches!(self, Self::Closed(_))
     }
 
+    #[cfg(feature = "alloc")]
     pub(crate) fn set<U>(self, value: U) -> TrySendError<U> {
         match self {
             Self::Full(_) => TrySendError::Full(value),

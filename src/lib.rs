@@ -33,16 +33,13 @@ extern crate alloc;
 #[cfg(feature = "alloc")]
 pub mod bounded;
 #[cfg(feature = "alloc")]
-pub mod oneshot;
-#[cfg(feature = "alloc")]
 pub mod unbounded;
 
+pub mod oneshot;
 pub mod semaphore;
 
-#[cfg(feature = "alloc")]
 pub use crate::error::*;
 
-#[cfg(feature = "alloc")]
 mod error;
 #[cfg(feature = "alloc")]
 mod mask;
