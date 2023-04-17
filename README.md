@@ -20,14 +20,15 @@ To use this crate, add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-async-unsync = "0.1.0"
+async-unsync = "0.2.0"
 ```
 
 [1]: https://docs.rs/tokio/latest/tokio/sync/index.html
 
 ## Cargo Features
 
-- `std`: **Enabled** by default, adds `Error` implementations for error types
+- `std`: **Enabled** by default, includes `alloc` and adds `Error` implementations for error types
+- `alloc`: **Enabled** by default, required for `bounded` and `unbounded` channels
 
 ### License
 

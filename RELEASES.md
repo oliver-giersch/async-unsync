@@ -16,4 +16,5 @@
 - Includes `Semaphore` API to acquire multiple permits in a single call
 - Introduces `alloc` feature and enables `semaphore` without it, i.e.,
   `Semaphore` now requires zero allocations.
+- Enables non-allocating `oneshot` channel uses without `alloc` feature.
 
