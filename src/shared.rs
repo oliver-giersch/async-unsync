@@ -88,8 +88,13 @@ impl<T> FromIterator<T> for UnsyncShared<T, Unbounded> {
     }
 }
 
+const fn assert_capacity(capacity: usize) {
+    assert!(capacity > 0, "channel capacity must be at least 1");
+}
+
 impl<T> UnsyncShared<T, Bounded> {
     pub(crate) const fn new(capacity: usize) -> Self {
+        assert_capacity(capacity);
         Self(UnsafeCell::new(Shared::new(
             VecDeque::new(),
             Bounded { semaphore: Semaphore::new(capacity), max_capacity: capacity },
@@ -97,10 +102,21 @@ impl<T> UnsyncShared<T, Bounded> {
     }
 
     pub(crate) fn with_capacity(capacity: usize, initial: usize) -> Self {
+        assert_capacity(capacity);
         let initial = core::cmp::max(capacity, initial);
         Self(UnsafeCell::new(Shared::new(
             VecDeque::with_capacity(initial),
             Bounded { semaphore: Semaphore::new(capacity), max_capacity: capacity },
+        )))
+    }
+
+    pub(crate) fn from_iter(capacity: usize, iter: impl IntoIterator<Item = T>) -> Self {
+        assert_capacity(capacity);
+        let queue = VecDeque::from_iter(iter);
+        let initial_capacity = capacity.saturating_sub(queue.len());
+        Self(UnsafeCell::new(Shared::new(
+            queue,
+            Bounded { semaphore: Semaphore::new(initial_capacity), max_capacity: capacity },
         )))
     }
 
@@ -116,7 +132,7 @@ impl<T> UnsyncShared<T, Bounded> {
 
     pub(crate) fn unbounded_send(&self, elem: T) {
         // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.0.get()).push_and_wake(elem) }
+        unsafe { (*self.0.get()).push_and_wake(elem) };
     }
 
     pub(crate) fn try_send<const COUNTED: bool>(&self, elem: T) -> Result<(), TrySendError<T>> {

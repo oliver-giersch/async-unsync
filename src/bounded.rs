@@ -34,9 +34,27 @@ pub struct Channel<T> {
 }
 
 impl<T> Channel<T> {
-    /// Returns a new unbounded channel with pre-allocated initial capacity.
+    /// Returns a new bounded channel with pre-allocated initial capacity.
+    ///
+    /// # Panics
+    ///
+    /// Panics, if `capacity` is zero.
     pub fn with_initial_capacity(capacity: usize, initial: usize) -> Self {
         Self { shared: BoundedShared::with_capacity(capacity, initial) }
+    }
+
+    /// Returns a new bounded channel with pre-queued elements.
+    ///
+    /// The initial capacity will be the difference between `capacity` and the
+    /// number of elements returned by the [`Iterator`].
+    /// The iterator may return more than `capacity` elements, but the channel's
+    /// capacity will never exceed the given `capacity`.
+    ///
+    /// # Panics
+    ///
+    /// Panics, if `capacity` is zero.
+    pub fn from_iter(capacity: usize, iter: impl IntoIterator<Item = T>) -> Self {
+        Self { shared: BoundedShared::from_iter(capacity, iter) }
     }
 
     /// Splits the channel into borrowing [`SenderRef`] and [`ReceiverRef`]
@@ -916,11 +934,13 @@ impl<T> fmt::Debug for OwnedPermit<T> {
 mod tests {
     use core::{future::Future as _, task::Poll};
 
+    use futures_lite::future;
+
     use crate::{alloc::boxed::Box, shared::RecvFuture};
 
     #[test]
     fn recv_split() {
-        futures_lite::future::block_on(async {
+        future::block_on(async {
             let mut chan = super::channel::<i32>(4);
             let (tx, mut rx) = chan.split();
             assert_eq!(tx.capacity(), 4);
@@ -948,7 +968,7 @@ mod tests {
 
     #[test]
     fn poll_often() {
-        futures_lite::future::block_on(async {
+        future::block_on(async {
             let mut chan = super::channel::<i32>(4);
             let (tx, rx) = chan.split();
 
@@ -969,7 +989,7 @@ mod tests {
 
     #[test]
     fn cancel_recv() {
-        futures_lite::future::block_on(async {
+        future::block_on(async {
             let mut chan = super::channel::<i32>(1);
             let (tx, mut rx) = chan.split();
             assert_eq!(tx.capacity(), 1);
@@ -992,7 +1012,7 @@ mod tests {
 
     #[test]
     fn cancel_send() {
-        futures_lite::future::block_on(async {
+        future::block_on(async {
             let mut chan = super::channel::<i32>(1);
             let (tx, mut rx) = chan.split();
             assert_eq!(tx.capacity(), 1);
@@ -1030,7 +1050,7 @@ mod tests {
 
     #[test]
     fn poll_out_of_order() {
-        futures_lite::future::block_on(async {
+        future::block_on(async {
             let mut chan = super::channel::<i32>(1);
             let (tx, mut rx) = chan.split();
             assert_eq!(tx.capacity(), 1);
@@ -1079,7 +1099,7 @@ mod tests {
 
     #[test]
     fn poll_out_of_order_drop() {
-        futures_lite::future::block_on(async {
+        future::block_on(async {
             let mut chan = super::channel::<i32>(1);
             let (tx, mut rx) = chan.split();
 
@@ -1129,7 +1149,7 @@ mod tests {
 
     #[test]
     fn reserve_and_close() {
-        futures_lite::future::block_on(async {
+        future::block_on(async {
             let mut chan = super::channel::<i32>(1);
             let (tx, mut rx) = chan.split();
 
@@ -1158,7 +1178,7 @@ mod tests {
 
     #[test]
     fn reserve_and_cancel() {
-        futures_lite::future::block_on(async {
+        future::block_on(async {
             let mut chan = super::channel::<i32>(1);
             let (tx, mut rx) = chan.split();
 
@@ -1189,7 +1209,7 @@ mod tests {
 
     #[test]
     fn reserve_and_drop_permit() {
-        futures_lite::future::block_on(async {
+        future::block_on(async {
             let mut chan = super::channel::<i32>(1);
             let (tx, mut rx) = chan.split();
 
@@ -1212,7 +1232,7 @@ mod tests {
 
     #[test]
     fn diverting_len_and_capacity() {
-        futures_lite::future::block_on(async {
+        future::block_on(async {
             let mut chan = super::channel(5);
             let (tx, mut rx) = chan.split();
 
@@ -1243,5 +1263,57 @@ mod tests {
         let (tx, rx) = chan.split();
         assert!(tx.is_closed());
         assert!(rx.is_closed());
+    }
+
+    #[test]
+    fn from_iter() {
+        future::block_on(async {
+            let chan = super::Channel::from_iter(3, [0, 1, 2, 3]);
+            assert_eq!(chan.recv().await, Some(0));
+            assert_eq!(chan.recv().await, Some(1));
+            assert_eq!(chan.recv().await, Some(2));
+            assert_eq!(chan.recv().await, Some(3));
+            assert_eq!(chan.capacity(), 3);
+        });
+    }
+
+    #[test]
+    fn send_vs_reserve() {
+        future::block_on(async {
+            let mut chan = super::channel::<i32>(1);
+            let (tx, mut rx) = chan.split();
+
+            assert!(tx.send(-1).await.is_ok());
+
+            let mut f1 = Box::pin(tx.send(-2));
+            let mut f2 = Box::pin(tx.send(-3));
+            let mut f3 = Box::pin(tx.reserve());
+
+            core::future::poll_fn(|cx| {
+                assert!(f1.as_mut().poll(cx).is_pending());
+                assert!(f2.as_mut().poll(cx).is_pending());
+                assert!(f3.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+
+            assert_eq!(rx.recv().await, Some(-1));
+            assert_eq!(tx.capacity(), 0, "capacity goes to f1");
+
+            assert!(f1.await.is_ok());
+            assert_eq!(tx.capacity(), 0);
+
+            assert_eq!(rx.recv().await, Some(-2));
+            assert_eq!(tx.capacity(), 0, "capacity goes to f3");
+
+            drop(f2);
+            assert_eq!(tx.capacity(), 0, "capacity goes to f3");
+
+            f3.await.unwrap().send(-4);
+            assert_eq!(tx.capacity(), 0);
+
+            assert_eq!(rx.recv().await, Some(-4));
+            assert_eq!(tx.capacity(), 1);
+        });
     }
 }

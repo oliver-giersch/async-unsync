@@ -17,4 +17,4 @@
 - Introduces `alloc` feature and enables `semaphore` without it, i.e.,
   `Semaphore` now requires zero allocations.
 - Enables non-allocating `oneshot` channel uses without `alloc` feature.
-
+- Document panic behavior when creating bounded channels with zero capacity.
