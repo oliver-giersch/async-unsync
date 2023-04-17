@@ -361,7 +361,7 @@ impl<T> MaybeBoundedQueue for Shared<T, Bounded> {
             // an element exists in the channel, wake the next blocked
             // sender, if any, and return the element
             Some(elem) => {
-                self.extra.semaphore.add_permits(1);
+                self.extra.add_permit();
                 Ok(elem)
             }
             // the channel is empty, but may also have been closed already
@@ -397,6 +397,12 @@ pub(crate) struct Bounded {
 }
 
 impl Bounded {
+    fn add_permit(&self) {
+        if self.semaphore.available_permits() < self.max_capacity {
+            self.semaphore.add_permits(1);
+        }
+    }
+
     fn has_outstanding_permits(&self) -> bool {
         self.semaphore.available_permits() != self.max_capacity
     }
