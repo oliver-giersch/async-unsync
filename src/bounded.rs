@@ -9,7 +9,7 @@ use crate::{
     alloc::{collections::VecDeque, rc::Rc},
     error::{SendError, TryRecvError, TrySendError},
     mask::{COUNTED, UNCOUNTED},
-    shared::BoundedShared,
+    queue::BoundedQueue,
 };
 
 /// Creates a new bounded channel with the given `capacity`.
@@ -19,7 +19,21 @@ use crate::{
 /// Panics, if `capacity` is zero.
 pub const fn channel<T>(capacity: usize) -> Channel<T> {
     assert!(capacity > 0, "channel capacity must be at least 1");
-    Channel { shared: BoundedShared::new(capacity) }
+    Channel { shared: BoundedQueue::new(capacity) }
+}
+
+/// Returns a new bounded channel with pre-queued elements.
+///
+/// The initial capacity will be the difference between `capacity` and the
+/// number of elements returned by the [`Iterator`].
+/// The iterator may return more than `capacity` elements, but the channel's
+/// capacity will never exceed the given `capacity`.
+///
+/// # Panics
+///
+/// Panics, if `capacity` is zero.
+pub fn channel_from_iter<T>(capacity: usize, iter: impl IntoIterator<Item = T>) -> Channel<T> {
+    Channel::from_iter(capacity, iter)
 }
 
 /// An unsynchronized (`!Sync`), asynchronous and bounded channel.
@@ -30,7 +44,7 @@ pub const fn channel<T>(capacity: usize) -> Channel<T> {
 /// Any further sends will have to wait (block), until capacity is restored by
 /// [receiving](Channel::recv) already stored values.
 pub struct Channel<T> {
-    shared: BoundedShared<T>,
+    shared: BoundedQueue<T>,
 }
 
 impl<T> Channel<T> {
@@ -40,7 +54,7 @@ impl<T> Channel<T> {
     ///
     /// Panics, if `capacity` is zero.
     pub fn with_initial_capacity(capacity: usize, initial: usize) -> Self {
-        Self { shared: BoundedShared::with_capacity(capacity, initial) }
+        Self { shared: BoundedQueue::with_capacity(capacity, initial) }
     }
 
     /// Returns a new bounded channel with pre-queued elements.
@@ -54,7 +68,7 @@ impl<T> Channel<T> {
     ///
     /// Panics, if `capacity` is zero.
     pub fn from_iter(capacity: usize, iter: impl IntoIterator<Item = T>) -> Self {
-        Self { shared: BoundedShared::from_iter(capacity, iter) }
+        Self { shared: BoundedQueue::from_iter(capacity, iter) }
     }
 
     /// Splits the channel into borrowing [`SenderRef`] and [`ReceiverRef`]
@@ -131,7 +145,7 @@ impl<T> Channel<T> {
         self.shared.capacity()
     }
 
-    /// Closes the channel so all subsequent sends will fail.
+    /// Closes the channel, ensuring that all subsequent sends will fail.
     ///
     /// # Examples
     ///
@@ -290,7 +304,7 @@ impl<T> fmt::Debug for Channel<T> {
 
 /// An owned handle for sending elements through a bounded split [`Channel`].
 pub struct Sender<T> {
-    shared: Rc<BoundedShared<T>>,
+    shared: Rc<BoundedQueue<T>>,
 }
 
 impl<T> Sender<T> {
@@ -532,7 +546,7 @@ impl<T> fmt::Debug for Sender<T> {
 
 /// A borrowing handle for sending elements through a bounded split [`Channel`].
 pub struct SenderRef<'a, T> {
-    shared: &'a BoundedShared<T>,
+    shared: &'a BoundedQueue<T>,
 }
 
 impl<T> SenderRef<'_, T> {
@@ -693,11 +707,11 @@ impl<T> fmt::Debug for SenderRef<'_, T> {
 
 /// An owning handle for receiving elements through a split bounded [`Channel`].
 pub struct Receiver<T> {
-    shared: Rc<BoundedShared<T>>,
+    shared: Rc<BoundedQueue<T>>,
 }
 
 impl<T> Receiver<T> {
-    /// Closes the channel causing all subsequent sends to fail.
+    /// Closes the channel, ensuring that all subsequent sends will fail.
     pub fn close(&mut self) {
         self.shared.close::<COUNTED>();
     }
@@ -781,11 +795,11 @@ impl<T> fmt::Debug for Receiver<T> {
 
 /// A borrowing handle for receiving elements through a split bounded [`Channel`].
 pub struct ReceiverRef<'a, T> {
-    shared: &'a BoundedShared<T>,
+    shared: &'a BoundedQueue<T>,
 }
 
 impl<T> ReceiverRef<'_, T> {
-    /// Closes the channel causing all subsequent sends to fail.
+    /// Closes the channel, ensuring that all subsequent sends will fail.
     pub fn close(&mut self) {
         self.shared.close::<COUNTED>();
     }
@@ -868,7 +882,7 @@ impl<T> fmt::Debug for ReceiverRef<'_, T> {
 
 /// A borrowing permit to send one value into the channel.
 pub struct Permit<'a, T> {
-    shared: &'a BoundedShared<T>,
+    shared: &'a BoundedQueue<T>,
 }
 
 impl<T> Permit<'_, T> {
@@ -936,7 +950,7 @@ mod tests {
 
     use futures_lite::future;
 
-    use crate::{alloc::boxed::Box, shared::RecvFuture};
+    use crate::{alloc::boxed::Box, queue::RecvFuture};
 
     #[test]
     fn recv_split() {

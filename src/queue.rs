@@ -12,17 +12,17 @@ use crate::{
     semaphore::Semaphore,
 };
 
-/// Specialization of `UnsyncShared` for bounded queues.
-pub(crate) type BoundedShared<T> = UnsyncShared<T, Bounded>;
-/// Specialization of `UnsyncShared` for unbounded queues.
-pub(crate) type UnboundedShared<T> = UnsyncShared<T, Unbounded>;
+/// Specialization of `UnsyncQueue` for bounded queues.
+pub(crate) type BoundedQueue<T> = UnsyncQueue<T, Bounded>;
+/// Specialization of `UnsyncQueue` for unbounded queues.
+pub(crate) type UnboundedQueue<T> = UnsyncQueue<T, Unbounded>;
 
-/// An unsynchronized wrapper for a [`Shared`] using [`UnsafeCell`].
-pub(crate) struct UnsyncShared<T, B>(pub(crate) UnsafeCell<Shared<T, B>>);
+/// An unsynchronized wrapper for a [`Queue`] using [`UnsafeCell`].
+pub(crate) struct UnsyncQueue<T, B>(pub(crate) UnsafeCell<Queue<T, B>>);
 
-impl<T, B> UnsyncShared<T, B>
+impl<T, B> UnsyncQueue<T, B>
 where
-    Shared<T, B>: MaybeBoundedQueue<Item = T>,
+    Queue<T, B>: MaybeBoundedQueue<Item = T>,
 {
     pub(crate) fn into_deque(self) -> VecDeque<T> {
         self.0.into_inner().queue
@@ -58,13 +58,13 @@ where
     }
 }
 
-impl<T> UnsyncShared<T, Unbounded> {
+impl<T> UnsyncQueue<T, Unbounded> {
     pub(crate) const fn new() -> Self {
-        Self(UnsafeCell::new(Shared::new(VecDeque::new(), Unbounded)))
+        Self(UnsafeCell::new(Queue::new(VecDeque::new(), Unbounded)))
     }
 
     pub(crate) fn with_capacity(capacity: usize) -> Self {
-        Self(UnsafeCell::new(Shared::new(VecDeque::with_capacity(capacity), Unbounded)))
+        Self(UnsafeCell::new(Queue::new(VecDeque::with_capacity(capacity), Unbounded)))
     }
 
     pub(crate) fn send<const COUNTED: bool>(&self, elem: T) -> Result<(), SendError<T>> {
@@ -82,20 +82,21 @@ impl<T> UnsyncShared<T, Unbounded> {
     }
 }
 
-impl<T> FromIterator<T> for UnsyncShared<T, Unbounded> {
+impl<T> FromIterator<T> for UnsyncQueue<T, Unbounded> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        Self(UnsafeCell::new(Shared::new(VecDeque::from_iter(iter), Unbounded)))
+        Self(UnsafeCell::new(Queue::new(VecDeque::from_iter(iter), Unbounded)))
     }
 }
 
+#[cold]
 const fn assert_capacity(capacity: usize) {
     assert!(capacity > 0, "channel capacity must be at least 1");
 }
 
-impl<T> UnsyncShared<T, Bounded> {
+impl<T> UnsyncQueue<T, Bounded> {
     pub(crate) const fn new(capacity: usize) -> Self {
         assert_capacity(capacity);
-        Self(UnsafeCell::new(Shared::new(
+        Self(UnsafeCell::new(Queue::new(
             VecDeque::new(),
             Bounded { semaphore: Semaphore::new(capacity), max_capacity: capacity },
         )))
@@ -104,7 +105,7 @@ impl<T> UnsyncShared<T, Bounded> {
     pub(crate) fn with_capacity(capacity: usize, initial: usize) -> Self {
         assert_capacity(capacity);
         let initial = core::cmp::max(capacity, initial);
-        Self(UnsafeCell::new(Shared::new(
+        Self(UnsafeCell::new(Queue::new(
             VecDeque::with_capacity(initial),
             Bounded { semaphore: Semaphore::new(capacity), max_capacity: capacity },
         )))
@@ -114,7 +115,7 @@ impl<T> UnsyncShared<T, Bounded> {
         assert_capacity(capacity);
         let queue = VecDeque::from_iter(iter);
         let initial_capacity = capacity.saturating_sub(queue.len());
-        Self(UnsafeCell::new(Shared::new(
+        Self(UnsafeCell::new(Queue::new(
             queue,
             Bounded { semaphore: Semaphore::new(initial_capacity), max_capacity: capacity },
         )))
@@ -218,7 +219,7 @@ impl<T> UnsyncShared<T, Bounded> {
     }
 }
 
-pub(crate) struct Shared<T, B = Unbounded> {
+pub(crate) struct Queue<T, B = Unbounded> {
     /// The mask storing the closed flag and number of active senders.
     pub(crate) mask: Mask,
     /// The queue storing each element sent through the channel
@@ -231,7 +232,7 @@ pub(crate) struct Shared<T, B = Unbounded> {
     extra: B,
 }
 
-impl<T, B> Shared<T, B> {
+impl<T, B> Queue<T, B> {
     pub(crate) fn decrease_sender_count(&mut self) {
         if self.mask.decrease_sender_count() {
             if let Some(waker) = self.waker.take() {
@@ -241,7 +242,7 @@ impl<T, B> Shared<T, B> {
     }
 
     const fn new(queue: VecDeque<T>, extra: B) -> Self {
-        Shared { mask: Mask::new(), queue, pop_count: 0, waker: None, extra }
+        Queue { mask: Mask::new(), queue, pop_count: 0, waker: None, extra }
     }
 
     /// Pushes `elem` to the back of the queue and wakes the registered
@@ -289,7 +290,7 @@ impl<T, B> Shared<T, B> {
     }
 }
 
-impl<T, B> Shared<T, B>
+impl<T, B> Queue<T, B>
 where
     Self: MaybeBoundedQueue<Item = T>,
 {
@@ -319,7 +320,7 @@ where
     }
 }
 
-impl<T> MaybeBoundedQueue for Shared<T, Unbounded> {
+impl<T> MaybeBoundedQueue for Queue<T, Unbounded> {
     type Item = T;
 
     fn reset(&mut self) {}
@@ -340,7 +341,7 @@ impl<T> MaybeBoundedQueue for Shared<T, Unbounded> {
     }
 }
 
-impl<T> MaybeBoundedQueue for Shared<T, Bounded> {
+impl<T> MaybeBoundedQueue for Queue<T, Bounded> {
     type Item = T;
 
     fn reset(&mut self) {
@@ -410,12 +411,12 @@ impl Bounded {
 
 /// The [`Future`] for receiving an element through the channel.
 pub(crate) struct RecvFuture<'a, T, B, const COUNTED: bool> {
-    pub(crate) shared: &'a UnsafeCell<Shared<T, B>>,
+    pub(crate) shared: &'a UnsafeCell<Queue<T, B>>,
 }
 
 impl<T, B, const COUNTED: bool> Future for RecvFuture<'_, T, B, COUNTED>
 where
-    Shared<T, B>: MaybeBoundedQueue<Item = T>,
+    Queue<T, B>: MaybeBoundedQueue<Item = T>,
 {
     type Output = Option<T>;
 

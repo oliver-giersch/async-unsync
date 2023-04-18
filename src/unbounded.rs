@@ -9,29 +9,34 @@ use crate::{
     alloc::{collections::VecDeque, rc::Rc},
     error::{SendError, TryRecvError},
     mask::{COUNTED, UNCOUNTED},
-    shared::UnboundedShared,
+    queue::UnboundedQueue,
 };
 
 /// Returns a new unbounded channel.
 pub const fn channel<T>() -> UnboundedChannel<T> {
-    UnboundedChannel { shared: UnboundedShared::new() }
+    UnboundedChannel { shared: UnboundedQueue::new() }
+}
+
+/// Returns a new unbounded channel with pre-queued elements.
+pub fn channel_from_iter<T>(iter: impl IntoIterator<Item = T>) -> UnboundedChannel<T> {
+    UnboundedChannel::from_iter(iter)
 }
 
 /// An unsynchronized (`!Sync`), asynchronous and unbounded channel.
 pub struct UnboundedChannel<T> {
-    shared: UnboundedShared<T>,
+    shared: UnboundedQueue<T>,
 }
 
 impl<T> FromIterator<T> for UnboundedChannel<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        Self { shared: UnboundedShared::from_iter(iter) }
+        Self { shared: UnboundedQueue::from_iter(iter) }
     }
 }
 
 impl<T> UnboundedChannel<T> {
     /// Returns a new unbounded channel with pre-allocated initial capacity.
     pub fn with_initial_capacity(initial: usize) -> Self {
-        Self { shared: UnboundedShared::with_capacity(initial) }
+        Self { shared: UnboundedQueue::with_capacity(initial) }
     }
 
     /// Splits the channel into borrowing [`UnboundedSenderRef`] and
@@ -83,9 +88,9 @@ impl<T> UnboundedChannel<T> {
         self.shared.len()
     }
 
-    /// Closes the channel so all subsequent sends will fail.
+    /// Closes the channel, ensuring that all subsequent sends will fail.
     pub fn close(&self) {
-        self.shared.close::<false>();
+        self.shared.close::<UNCOUNTED>();
     }
 
     /// Returns `true` if the channel is closed.
@@ -146,7 +151,7 @@ impl<T> fmt::Debug for UnboundedChannel<T> {
 /// An owned handle for sending elements through an unbounded split
 /// [`UnboundedChannel`].
 pub struct UnboundedSender<T> {
-    shared: Rc<UnboundedShared<T>>,
+    shared: Rc<UnboundedQueue<T>>,
 }
 
 impl<T> UnboundedSender<T> {
@@ -218,7 +223,7 @@ impl<T> fmt::Debug for UnboundedSender<T> {
 /// A borrowing handle for sending elements through an unbounded split
 /// [`UnboundedChannel`].
 pub struct UnboundedSenderRef<'a, T> {
-    shared: &'a UnboundedShared<T>,
+    shared: &'a UnboundedQueue<T>,
 }
 
 impl<T> UnboundedSenderRef<'_, T> {
@@ -291,11 +296,11 @@ impl<T> fmt::Debug for UnboundedSenderRef<'_, T> {
 /// An owning handle for receiving elements through a split unbounded
 /// [`UnboundedChannel`].
 pub struct UnboundedReceiver<T> {
-    shared: Rc<UnboundedShared<T>>,
+    shared: Rc<UnboundedQueue<T>>,
 }
 
 impl<T> UnboundedReceiver<T> {
-    /// Closes the channel causing all subsequent sends to fail.
+    /// Closes the channel, ensuring that all subsequent sends will fail.
     pub fn close(&mut self) {
         self.shared.close::<COUNTED>();
     }
@@ -361,11 +366,11 @@ impl<T> fmt::Debug for UnboundedReceiver<T> {
 /// A borrowing handle for receiving elements through a split unbounded
 /// [`UnboundedChannel`].
 pub struct UnboundedReceiverRef<'a, T> {
-    shared: &'a UnboundedShared<T>,
+    shared: &'a UnboundedQueue<T>,
 }
 
 impl<T> UnboundedReceiverRef<'_, T> {
-    /// Closes the channel causing all subsequent sends to fail.
+    /// Closes the channel, ensuring that all subsequent sends will fail.
     pub fn close(&mut self) {
         self.shared.close::<COUNTED>();
     }

@@ -44,4 +44,4 @@ mod error;
 #[cfg(feature = "alloc")]
 mod mask;
 #[cfg(feature = "alloc")]
-mod shared;
+mod queue;
