@@ -1305,6 +1305,7 @@ mod tests {
             let permit = tx.reserve().await.unwrap();
             assert_eq!(tx.capacity(), 0);
             assert_eq!(tx.max_capacity(), 1);
+            assert_eq!(tx.shared.outstanding_permits(), 0, "reservation forgets permit");
 
             rx.close();
             core::future::poll_fn(|cx| {

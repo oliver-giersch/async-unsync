@@ -165,6 +165,7 @@ impl<'a> Permit<'a> {
     ///
     /// This permanently reduces the number of available permits.
     pub fn forget(self) {
+        // SAFETY: no mutable or aliased access to shared possible
         unsafe { (*self.shared.get()).outstanding_permits -= self.count };
         mem::forget(self);
     }
@@ -173,9 +174,15 @@ impl<'a> Permit<'a> {
 impl Drop for Permit<'_> {
     fn drop(&mut self) {
         // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.get()).add_permits(self.count) };
-        // underflow?
-        unsafe { (*self.shared.get()).outstanding_permits -= self.count };
+        let shared = unsafe { &mut (*self.shared.get()) };
+
+        // underflow *would* be possible, since `Permit`s can be forgotten,
+        // which reduces outstanding permits and then be created again
+        // (internally) "out of thin air"; the order is important here, because
+        // `add_permits` may mark permits as handed out again, if they are
+        // transfered to other waiters
+        shared.outstanding_permits = shared.outstanding_permits.saturating_sub(self.count);
+        shared.add_permits(self.count);
     }
 }
 
@@ -282,8 +289,10 @@ impl Drop for Acquire<'_> {
         // return all "unused" (i.e., not passed on into a [`Permit`]) permits
         // back to the semaphore
         let permits = self.waiter.permits.get();
-        shared.add_permits(permits);
+        // the order is important here, because `add_permits` may mark permits
+        // as handed out again, if they are transfered to other waiters
         shared.outstanding_permits -= permits;
+        shared.add_permits(permits);
     }
 }
 
@@ -372,7 +381,7 @@ impl Shared {
             // hand out all available permits
             let count = self.permits;
             self.permits = 0;
-            self.outstanding_permits += count;
+            self.outstanding_permits = self.outstanding_permits.saturating_add(count);
             Ok(count)
         } else {
             // can not underflow because n <= permits
