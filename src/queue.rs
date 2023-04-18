@@ -136,6 +136,20 @@ impl<T> UnsyncQueue<T, Bounded> {
         unsafe { (*self.0.get()).push_and_wake(elem) };
     }
 
+    pub(crate) fn outstanding_permits(&self) -> usize {
+        // SAFETY: no mutable or aliased access to shared possible
+        let shared = unsafe { &mut *self.0.get() };
+        shared.extra.semaphore.outstanding_permits()
+    }
+
+    pub(crate) fn capacity_reducing_unbounded_send(&self, elem: T) {
+        // SAFETY: no mutable or aliased access to shared possible
+        let shared = unsafe { &mut *self.0.get() };
+
+        shared.extra.semaphore.remove_permits(1);
+        shared.push_and_wake(elem);
+    }
+
     pub(crate) fn try_send<const COUNTED: bool>(&self, elem: T) -> Result<(), TrySendError<T>> {
         // SAFETY: no mutable or aliased access to shared possible
         let shared = unsafe { &mut *self.0.get() };
@@ -399,7 +413,8 @@ pub(crate) struct Bounded {
 
 impl Bounded {
     fn add_permit(&self) {
-        if self.semaphore.available_permits() < self.max_capacity {
+        let permits = self.semaphore.available_permits() + self.semaphore.outstanding_permits();
+        if permits < self.max_capacity {
             self.semaphore.add_permits(1);
         }
     }

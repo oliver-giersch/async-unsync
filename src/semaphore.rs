@@ -118,6 +118,12 @@ impl Semaphore {
         Permit { shared: &self.shared, count }
     }
 
+    /// Returns the current number of outstanding permits.
+    pub(crate) fn outstanding_permits(&self) -> usize {
+        // SAFETY: no mutable or aliased access to shared possible
+        unsafe { (*self.shared.get()).waiters.outstanding_permits() }
+    }
+
     fn build_acquire(&self, wants: usize) -> Acquire<'_> {
         Acquire {
             shared: &self.shared,
@@ -482,6 +488,22 @@ impl WaiterQueue {
         }
 
         waiting
+    }
+
+    /// ...
+    ///
+    /// # Safety
+    ///
+    /// All pointers must reference valid, live and non-aliased `Waiter`s.
+    unsafe fn outstanding_permits(&self) -> usize {
+        let mut curr = self.head;
+        let mut permits = 0;
+        while !curr.is_null() {
+            permits += (*curr).permits.get();
+            curr = unsafe { (*curr).next.get() };
+        }
+
+        permits
     }
 
     /// Returns `true` if the queue contains `waiter`.

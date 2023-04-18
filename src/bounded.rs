@@ -598,6 +598,16 @@ impl<T> SenderRef<'_, T> {
         self.shared.try_send::<COUNTED>(elem)
     }
 
+    // TODO: private for now
+    pub(crate) fn unbounded_send(&self, elem: T) -> Result<(), SendError<T>> {
+        if self.is_closed() {
+            return Err(SendError(elem));
+        }
+
+        self.shared.capacity_reducing_unbounded_send(elem);
+        Ok(())
+    }
+
     /// Sends a value through the channel, potentially blocking until there is
     /// sufficient capacity.
     ///
@@ -1318,6 +1328,63 @@ mod tests {
             assert_eq!(tx.capacity(), 0);
 
             assert_eq!(rx.recv().await, Some(-2));
+            assert_eq!(tx.capacity(), 0, "capacity goes to f3");
+
+            drop(f2);
+            assert_eq!(tx.capacity(), 0, "capacity goes to f3");
+
+            f3.await.unwrap().send(-4);
+            assert_eq!(tx.capacity(), 0);
+
+            assert_eq!(rx.recv().await, Some(-4));
+            assert_eq!(tx.capacity(), 1);
+        });
+    }
+
+    #[test]
+    #[ignore]
+    fn unbounded_send() {
+        future::block_on(async {
+            let mut chan = super::channel::<i32>(1);
+            let (tx, mut rx) = chan.split();
+
+            assert!(tx.send(-1).await.is_ok());
+            assert_eq!(tx.capacity(), 0);
+
+            let mut f1 = Box::pin(tx.send(-2));
+            let mut f2 = Box::pin(tx.send(-3));
+            let mut f3 = Box::pin(tx.reserve());
+
+            core::future::poll_fn(|cx| {
+                assert!(f1.as_mut().poll(cx).is_pending());
+                assert!(f2.as_mut().poll(cx).is_pending());
+                assert!(f3.as_mut().poll(cx).is_pending());
+                assert_eq!(tx.capacity(), 0); // logically -3
+
+                Poll::Ready(())
+            })
+            .await;
+
+            assert!(tx.unbounded_send(-99).is_ok());
+            assert!(tx.unbounded_send(-99).is_ok());
+            assert!(tx.unbounded_send(-99).is_ok());
+            assert_eq!(tx.capacity(), 0);
+
+            assert_eq!(rx.recv().await, Some(-1));
+            assert_eq!(tx.capacity(), 0, "capacity goes to f1");
+            assert_eq!(tx.shared.outstanding_permits(), 1);
+
+            assert_eq!(rx.recv().await, Some(-99));
+            assert_eq!(rx.recv().await, Some(-99));
+            assert_eq!(tx.capacity(), 0, "capacity goes to f1");
+
+            assert!(f1.await.is_ok());
+            assert_eq!(tx.capacity(), 0);
+
+            assert_eq!(rx.recv().await, Some(-99));
+            assert_eq!(rx.recv().await, Some(-2));
+
+            assert_eq!(tx.shared.outstanding_permits(), 1);
             assert_eq!(tx.capacity(), 0, "capacity goes to f3");
 
             drop(f2);
