@@ -213,6 +213,29 @@ impl<T> Channel<T> {
         self.shared.try_send::<UNCOUNTED>(elem)
     }
 
+    /// Sends a value through the channel, ignoring any capacity constraints.
+    ///
+    /// This will immediately enqueue `elem`, even if there are currently
+    /// senders waiting due to a lack of available capacity.
+    /// Care must be taken with unbounded sends, as they may undermine
+    /// assumptions about message ordering and the ability to apply
+    /// backpressure.
+    /// Alternatively, this can be thought of as a one-time capacity increase.
+    ///
+    /// # Errors
+    ///
+    /// Fails, if the queue is closed.
+    pub fn unbounded_send(&self, elem: T) -> Result<(), SendError<T>> {
+        const CAPACITY_REDUCING: bool = true;
+
+        if self.is_closed() {
+            return Err(SendError(elem));
+        }
+
+        self.shared.unbounded_send::<CAPACITY_REDUCING>(elem);
+        Ok(())
+    }
+
     /// Sends a value, potentially waiting until there is capacity.
     ///
     /// # Errors
@@ -354,6 +377,29 @@ impl<T> Sender<T> {
     /// Fails, if the queue is closed or there is no available capacity.
     pub fn try_send(&self, elem: T) -> Result<(), TrySendError<T>> {
         self.shared.try_send::<COUNTED>(elem)
+    }
+
+    /// Sends a value through the channel, ignoring any capacity constraints.
+    ///
+    /// This will immediately enqueue `elem`, even if there are currently
+    /// senders waiting due to a lack of available capacity.
+    /// Care must be taken with unbounded sends, as they may undermine
+    /// assumptions about message ordering and the ability to apply
+    /// backpressure.
+    /// Alternatively, this can be thought of as a one-time capacity increase.
+    ///
+    /// # Errors
+    ///
+    /// Fails, if the queue is closed.
+    pub fn unbounded_send(&self, elem: T) -> Result<(), SendError<T>> {
+        const CAPACITY_REDUCING: bool = true;
+
+        if self.is_closed() {
+            return Err(SendError(elem));
+        }
+
+        self.shared.unbounded_send::<CAPACITY_REDUCING>(elem);
+        Ok(())
     }
 
     /// Sends a value through the channel, potentially waiting until there is
@@ -598,13 +644,26 @@ impl<T> SenderRef<'_, T> {
         self.shared.try_send::<COUNTED>(elem)
     }
 
-    // TODO: private for now
-    pub(crate) fn unbounded_send(&self, elem: T) -> Result<(), SendError<T>> {
+    /// Sends a value through the channel, ignoring any capacity constraints.
+    ///
+    /// This will immediately enqueue `elem`, even if there are currently
+    /// senders waiting due to a lack of available capacity.
+    /// Care must be taken with unbounded sends, as they may undermine
+    /// assumptions about message ordering and the ability to apply
+    /// backpressure.
+    /// Alternatively, this can be thought of as a one-time capacity increase.
+    ///
+    /// # Errors
+    ///
+    /// Fails, if the queue is closed.
+    pub fn unbounded_send(&self, elem: T) -> Result<(), SendError<T>> {
+        const CAPACITY_REDUCING: bool = true;
+
         if self.is_closed() {
             return Err(SendError(elem));
         }
 
-        self.shared.capacity_reducing_unbounded_send(elem);
+        self.shared.unbounded_send::<CAPACITY_REDUCING>(elem);
         Ok(())
     }
 
@@ -902,7 +961,10 @@ impl<T> Permit<'_, T> {
     /// immediately and the permit is consumed.
     /// This will succeed even if the channel has been closed.
     pub fn send(self, elem: T) {
-        self.shared.unbounded_send(elem);
+        // must not reduce capacity again (done during reservation)
+        const CAPACITY_REDUCING: bool = false;
+
+        self.shared.unbounded_send::<CAPACITY_REDUCING>(elem);
         mem::forget(self);
     }
 }
@@ -934,8 +996,11 @@ impl<T> OwnedPermit<T> {
     /// Unlike [`Permit::send`], this method returns the [`Sender`] from which
     /// the [`OwnedPermit`] was reserved.
     pub fn send(mut self, elem: T) -> Sender<T> {
+        // must not reduce capacity again (done during reservation)
+        const CAPACITY_REDUCING: bool = false;
+
         let sender = self.sender.take().unwrap_or_else(|| unreachable!());
-        sender.shared.unbounded_send(elem);
+        sender.shared.unbounded_send::<CAPACITY_REDUCING>(elem);
         sender
     }
 }
@@ -1342,7 +1407,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn unbounded_send() {
         future::block_on(async {
             let mut chan = super::channel::<i32>(1);
@@ -1377,10 +1441,12 @@ mod tests {
             assert_eq!(rx.recv().await, Some(-99));
             assert_eq!(rx.recv().await, Some(-99));
             assert_eq!(tx.capacity(), 0, "capacity goes to f1");
+            assert_eq!(tx.shared.outstanding_permits(), 1);
 
             assert!(f1.await.is_ok());
-            assert_eq!(tx.capacity(), 0);
+            assert_eq!(tx.capacity(), 0, "capacity goes to f2");
 
+            // capacity saturates at 1, is owned "in limbo" by f2
             assert_eq!(rx.recv().await, Some(-99));
             assert_eq!(rx.recv().await, Some(-2));
 
@@ -1389,12 +1455,14 @@ mod tests {
 
             drop(f2);
             assert_eq!(tx.capacity(), 0, "capacity goes to f3");
+            assert_eq!(tx.shared.outstanding_permits(), 1);
 
             f3.await.unwrap().send(-4);
             assert_eq!(tx.capacity(), 0);
 
             assert_eq!(rx.recv().await, Some(-4));
             assert_eq!(tx.capacity(), 1);
+            assert_eq!(tx.shared.outstanding_permits(), 0);
         });
     }
 }

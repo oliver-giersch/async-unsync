@@ -131,22 +131,13 @@ impl<T> UnsyncQueue<T, Bounded> {
         unsafe { (*self.0.get()).extra.semaphore.available_permits() }
     }
 
-    pub(crate) fn unbounded_send(&self, elem: T) {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.0.get()).push_and_wake(elem) };
-    }
-
-    pub(crate) fn outstanding_permits(&self) -> usize {
+    pub(crate) fn unbounded_send<const CAPACITY_REDUCING: bool>(&self, elem: T) {
         // SAFETY: no mutable or aliased access to shared possible
         let shared = unsafe { &mut *self.0.get() };
-        shared.extra.semaphore.outstanding_permits()
-    }
+        if CAPACITY_REDUCING {
+            shared.extra.semaphore.remove_permits(1);
+        }
 
-    pub(crate) fn capacity_reducing_unbounded_send(&self, elem: T) {
-        // SAFETY: no mutable or aliased access to shared possible
-        let shared = unsafe { &mut *self.0.get() };
-
-        shared.extra.semaphore.remove_permits(1);
         shared.push_and_wake(elem);
     }
 
@@ -230,6 +221,12 @@ impl<T> UnsyncQueue<T, Bounded> {
     pub(crate) fn unreserve(&self) {
         // SAFETY: no mutable or aliased access to shared possible
         drop(unsafe { (*self.0.get()).extra.semaphore.make_permit(1) });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn outstanding_permits(&self) -> usize {
+        // SAFETY: no mutable or aliased access to shared possible
+        unsafe { (*self.0.get()).extra.semaphore.outstanding_permits() }
     }
 }
 
@@ -392,13 +389,20 @@ impl<T> MaybeBoundedQueue for Queue<T, Bounded> {
     }
 }
 
+/// A trait abstracting over either *bounded* or *unbounded* queues.
+///
+/// This is declared as public but not exported in the crate's API.
 pub trait MaybeBoundedQueue {
+    /// The type stored in the queue.
     type Item: Sized;
 
+    /// Resets the available capacity for a bounded queue.
     fn reset(&mut self);
 
+    /// Closes the queue and notifies all waiters.
     fn close<const COUNTED: bool>(&mut self);
 
+    /// Dequeues an element from the queue.
     fn try_recv<const COUNTED: bool>(&mut self) -> Result<Self::Item, TryRecvError>;
 }
 
