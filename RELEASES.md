@@ -28,3 +28,7 @@
 - Introduces split `alloc` and `std` features, `bounded` and `unbounded` no
   longer exist without the `alloc` feature enabled,
   `oneshot::Channel::into_split` likewise requires `alloc`.
+
+## Release `0.2.1`
+
+- Fixes a bug `Semaphore` that would not wake waiters on close.

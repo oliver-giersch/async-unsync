@@ -282,6 +282,7 @@ impl<T, B> Queue<T, B> {
                 // when the queue first becomes empty, try to shrink it once.
                 if self.pop_count > 0 {
                     self.try_shrink_queue();
+                    self.pop_count = 0;
                 }
 
                 None

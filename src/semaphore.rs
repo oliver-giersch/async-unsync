@@ -312,11 +312,10 @@ impl Shared {
     /// Closes the semaphore and notifies all remaining waiters.
     fn close(&mut self) -> usize {
         self.closed = true;
-        // SAFETY: All waiters remain valid while they are enqueued
-        let waiting = unsafe { self.waiters.len() };
+        let woken = unsafe { self.waiters.wake_all() };
         self.waiters = WaiterQueue::new();
 
-        waiting
+        woken
     }
 
     /// Returns `true` if the semaphore has been closed.
@@ -588,6 +587,23 @@ impl WaiterQueue {
             self.tail = ptr::null();
         }
     }
+
+    unsafe fn wake_all(&mut self) -> usize {
+        let mut curr = self.head;
+        let mut woken = 0;
+
+        while !curr.is_null() {
+            unsafe {
+                (*curr).waiting.set(false);
+                (*curr).waker.get().wake_by_ref();
+                curr = (*curr).next.get();
+            }
+
+            woken += 1;
+        }
+
+        woken
+    }
 }
 
 /// A queue-able waiter that will be notified, when its requested number of
@@ -826,7 +842,8 @@ mod tests {
             })
             .await;
 
-            assert_eq!(sem.close(), 1);
+            assert_eq!(sem.waiters(), 1);
+            sem.close();
             assert_eq!(sem.waiters(), 0);
 
             core::future::poll_fn(|cx| {
@@ -849,6 +866,39 @@ mod tests {
             // no further permits can be acquired
             assert!(sem.try_acquire().is_err());
             assert!(sem.acquire().await.is_err());
+        });
+    }
+
+    #[test]
+    fn closing_wakes() {
+        future::block_on(async {
+            let sem = super::Semaphore::new(0);
+            let mut fut = Box::pin(sem.build_acquire(1));
+
+            core::future::poll_fn(|cx| {
+                // poll once to enque the future as waiting
+                assert!(fut.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+
+            assert_eq!(sem.waiters(), 1);
+            sem.close();
+            assert_eq!(sem.waiters(), 0);
+            assert_eq!(fut.waiter.waiting.get(), false);
+
+            core::future::poll_fn(|cx| {
+                // closing the semaphore should have woken the future
+                match fut.as_mut().poll(cx) {
+                    Poll::Ready(Err(_)) => Poll::Ready(()),
+                    _ => panic!("acquire future should have resolved"),
+                }
+            })
+            .await;
+
+            // dropping the future should have no effect
+            drop(fut);
+            assert_eq!(sem.available_permits(), 0);
         });
     }
 
