@@ -14,7 +14,7 @@ use crate::{
 
 /// Returns a new unbounded channel.
 pub const fn channel<T>() -> UnboundedChannel<T> {
-    UnboundedChannel { shared: UnboundedQueue::new() }
+    UnboundedChannel { queue: UnboundedQueue::new() }
 }
 
 /// Returns a new unbounded channel with pre-queued elements.
@@ -24,19 +24,19 @@ pub fn channel_from_iter<T>(iter: impl IntoIterator<Item = T>) -> UnboundedChann
 
 /// An unsynchronized (`!Sync`), asynchronous and unbounded channel.
 pub struct UnboundedChannel<T> {
-    shared: UnboundedQueue<T>,
+    queue: UnboundedQueue<T>,
 }
 
 impl<T> FromIterator<T> for UnboundedChannel<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        Self { shared: UnboundedQueue::from_iter(iter) }
+        Self { queue: UnboundedQueue::from_iter(iter) }
     }
 }
 
 impl<T> UnboundedChannel<T> {
     /// Returns a new unbounded channel with pre-allocated initial capacity.
     pub fn with_initial_capacity(initial: usize) -> Self {
-        Self { shared: UnboundedQueue::with_capacity(initial) }
+        Self { queue: UnboundedQueue::with_capacity(initial) }
     }
 
     /// Splits the channel into borrowing [`UnboundedSenderRef`] and
@@ -61,8 +61,8 @@ impl<T> UnboundedChannel<T> {
     /// assert!(chan.try_recv().is_err());
     /// ```
     pub fn split(&mut self) -> (UnboundedSenderRef<'_, T>, UnboundedReceiverRef<'_, T>) {
-        self.shared.0.get_mut().set_counted();
-        (UnboundedSenderRef { shared: &self.shared }, UnboundedReceiverRef { shared: &self.shared })
+        self.queue.0.get_mut().set_counted();
+        (UnboundedSenderRef { queue: &self.queue }, UnboundedReceiverRef { queue: &self.queue })
     }
 
     /// Splits the channel into owning [`UnboundedSender`] and
@@ -73,29 +73,29 @@ impl<T> UnboundedChannel<T> {
     /// restrictions, since the returned handles are valid for the `'static`
     /// lifetime, meaning they can be used in spawned (local) tasks.
     pub fn into_split(mut self) -> (UnboundedSender<T>, UnboundedReceiver<T>) {
-        self.shared.0.get_mut().set_counted();
-        let shared = Rc::new(self.shared);
-        (UnboundedSender { shared: Rc::clone(&shared) }, UnboundedReceiver { shared })
+        self.queue.0.get_mut().set_counted();
+        let queue = Rc::new(self.queue);
+        (UnboundedSender { queue: Rc::clone(&queue) }, UnboundedReceiver { queue })
     }
 
     /// Converts into the underlying [`VecDeque`] container.
     pub fn into_deque(self) -> VecDeque<T> {
-        self.shared.into_deque()
+        self.queue.into_deque()
     }
 
     /// Returns the number of queued elements.
     pub fn len(&self) -> usize {
-        self.shared.len()
+        self.queue.len()
     }
 
     /// Closes the channel, ensuring that all subsequent sends will fail.
     pub fn close(&self) {
-        self.shared.close::<UNCOUNTED>();
+        self.queue.close::<UNCOUNTED>();
     }
 
     /// Returns `true` if the channel is closed.
     pub fn is_closed(&self) -> bool {
-        self.shared.is_closed::<UNCOUNTED>()
+        self.queue.is_closed::<UNCOUNTED>()
     }
 
     /// Returns `true` if the channel is empty.
@@ -110,14 +110,14 @@ impl<T> UnboundedChannel<T> {
     /// Fails, if the channel is [empty](TryRecvError::Empty) or
     /// [disconnected](TryRecvError::Disconnected).
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        self.shared.try_recv::<UNCOUNTED>()
+        self.queue.try_recv::<UNCOUNTED>()
     }
 
     /// Polls the channel, resolving if an element was received or the channel
     /// is closed, ignoring whether there are any remaining **Sender**(s) or
     /// not.
     pub fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Option<T>> {
-        self.shared.poll_recv::<UNCOUNTED>(cx)
+        self.queue.poll_recv::<UNCOUNTED>(cx)
     }
 
     /// Receives an element through the channel.
@@ -126,7 +126,7 @@ impl<T> UnboundedChannel<T> {
     ///
     /// Fails, if the channel is closed (i.e., all senders have been dropped).
     pub async fn recv(&self) -> Option<T> {
-        self.shared.recv::<UNCOUNTED>().await
+        self.queue.recv::<UNCOUNTED>().await
     }
 
     /// Sends a value through the channel.
@@ -135,7 +135,7 @@ impl<T> UnboundedChannel<T> {
     ///
     /// Fails, if the queue is closed.
     pub fn send(&self, elem: T) -> Result<(), SendError<T>> {
-        self.shared.send::<UNCOUNTED>(elem)
+        self.queue.send::<UNCOUNTED>(elem)
     }
 }
 
@@ -151,29 +151,29 @@ impl<T> fmt::Debug for UnboundedChannel<T> {
 /// An owned handle for sending elements through an unbounded split
 /// [`UnboundedChannel`].
 pub struct UnboundedSender<T> {
-    shared: Rc<UnboundedQueue<T>>,
+    queue: Rc<UnboundedQueue<T>>,
 }
 
 impl<T> UnboundedSender<T> {
     /// Returns the number of currently queued elements.
     pub fn len(&self) -> usize {
-        self.shared.len()
+        self.queue.len()
     }
 
     /// Returns `true` if the channel is closed.
     pub fn is_closed(&self) -> bool {
-        self.shared.is_closed::<COUNTED>()
+        self.queue.is_closed::<COUNTED>()
     }
 
     /// Returns `true` if the channel is empty.
     pub fn is_empty(&self) -> bool {
-        self.shared.len() == 0
+        self.queue.len() == 0
     }
 
     /// Returns `true` if `self` and `other` are handles for the same channel
     /// instance.
     pub fn same_channel(&self, other: &Self) -> bool {
-        core::ptr::eq(Rc::as_ptr(&self.shared), Rc::as_ptr(&other.shared))
+        core::ptr::eq(Rc::as_ptr(&self.queue), Rc::as_ptr(&other.queue))
     }
 
     /// Sends a value through the channel.
@@ -192,22 +192,22 @@ impl<T> UnboundedSender<T> {
     /// assert_eq!(rx.try_recv(), Ok(1));
     /// ```
     pub fn send(&self, elem: T) -> Result<(), SendError<T>> {
-        self.shared.send::<COUNTED>(elem)
+        self.queue.send::<COUNTED>(elem)
     }
 }
 
 impl<T> Clone for UnboundedSender<T> {
     fn clone(&self) -> Self {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.0.get()).mask.increase_sender_count() };
-        Self { shared: Rc::clone(&self.shared) }
+        // SAFETY: no mutable or aliased access to queue possible
+        unsafe { (*self.queue.0.get()).mask.increase_sender_count() };
+        Self { queue: Rc::clone(&self.queue) }
     }
 }
 
 impl<T> Drop for UnboundedSender<T> {
     fn drop(&mut self) {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.0.get()).decrease_sender_count() };
+        // SAFETY: no mutable or aliased access to queue possible
+        unsafe { (*self.queue.0.get()).decrease_sender_count() };
     }
 }
 
@@ -223,29 +223,29 @@ impl<T> fmt::Debug for UnboundedSender<T> {
 /// A borrowing handle for sending elements through an unbounded split
 /// [`UnboundedChannel`].
 pub struct UnboundedSenderRef<'a, T> {
-    shared: &'a UnboundedQueue<T>,
+    queue: &'a UnboundedQueue<T>,
 }
 
 impl<T> UnboundedSenderRef<'_, T> {
     /// Returns the number of queued elements.
     pub fn len(&self) -> usize {
-        self.shared.len()
+        self.queue.len()
     }
 
     /// Returns `true` if the channel is closed.
     pub fn is_closed(&self) -> bool {
-        self.shared.is_closed::<COUNTED>()
+        self.queue.is_closed::<COUNTED>()
     }
 
     /// Returns `true` if the channel is empty.
     pub fn is_empty(&self) -> bool {
-        self.shared.len() == 0
+        self.queue.len() == 0
     }
 
     /// Returns `true` if `self` and `other` are handles for the same channel
     /// instance.
     pub fn same_channel(&self, other: &Self) -> bool {
-        core::ptr::eq(&self.shared, &other.shared)
+        core::ptr::eq(&self.queue, &other.queue)
     }
 
     /// Sends a value through the channel.
@@ -265,22 +265,22 @@ impl<T> UnboundedSenderRef<'_, T> {
     /// assert_eq!(rx.try_recv(), Ok(1));
     /// ```
     pub fn send(&self, elem: T) -> Result<(), SendError<T>> {
-        self.shared.send::<COUNTED>(elem)
+        self.queue.send::<COUNTED>(elem)
     }
 }
 
 impl<T> Clone for UnboundedSenderRef<'_, T> {
     fn clone(&self) -> Self {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.0.get()).mask.increase_sender_count() };
-        Self { shared: self.shared }
+        // SAFETY: no mutable or aliased access to queue possible
+        unsafe { (*self.queue.0.get()).mask.increase_sender_count() };
+        Self { queue: self.queue }
     }
 }
 
 impl<T> Drop for UnboundedSenderRef<'_, T> {
     fn drop(&mut self) {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.0.get()).decrease_sender_count() };
+        // SAFETY: no mutable or aliased access to queue possible
+        unsafe { (*self.queue.0.get()).decrease_sender_count() };
     }
 }
 
@@ -296,28 +296,28 @@ impl<T> fmt::Debug for UnboundedSenderRef<'_, T> {
 /// An owning handle for receiving elements through a split unbounded
 /// [`UnboundedChannel`].
 pub struct UnboundedReceiver<T> {
-    shared: Rc<UnboundedQueue<T>>,
+    queue: Rc<UnboundedQueue<T>>,
 }
 
 impl<T> UnboundedReceiver<T> {
     /// Closes the channel, ensuring that all subsequent sends will fail.
     pub fn close(&mut self) {
-        self.shared.close::<COUNTED>();
+        self.queue.close::<COUNTED>();
     }
 
     /// Returns the number of queued elements.
     pub fn len(&self) -> usize {
-        self.shared.len()
+        self.queue.len()
     }
 
     /// Returns `true` if the channel is closed.
     pub fn is_closed(&self) -> bool {
-        self.shared.is_closed::<COUNTED>()
+        self.queue.is_closed::<COUNTED>()
     }
 
     /// Returns `true` if the channel is empty.
     pub fn is_empty(&self) -> bool {
-        self.shared.len() == 0
+        self.queue.len() == 0
     }
 
     /// Attempts to receive an element through the channel.
@@ -327,14 +327,14 @@ impl<T> UnboundedReceiver<T> {
     /// Fails, if the channel is [empty](TryRecvError::Empty) or
     /// [disconnected](TryRecvError::Disconnected).
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
-        self.shared.try_recv::<COUNTED>()
+        self.queue.try_recv::<COUNTED>()
     }
 
     /// Polls the channel, resolving if an element was received or the channel
     /// is closed but ignoring whether there are any remaining **Sender**(s) or
     /// not.
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
-        self.shared.poll_recv::<COUNTED>(cx)
+        self.queue.poll_recv::<COUNTED>(cx)
     }
 
     /// Receives an element through the channel.
@@ -344,13 +344,13 @@ impl<T> UnboundedReceiver<T> {
     /// Fails, if the channel is [empty](TryRecvError::Empty) or
     /// [disconnected](TryRecvError::Disconnected).
     pub async fn recv(&mut self) -> Option<T> {
-        self.shared.recv::<COUNTED>().await
+        self.queue.recv::<COUNTED>().await
     }
 }
 
 impl<T> Drop for UnboundedReceiver<T> {
     fn drop(&mut self) {
-        self.shared.close::<COUNTED>();
+        self.queue.close::<COUNTED>();
     }
 }
 
@@ -366,28 +366,28 @@ impl<T> fmt::Debug for UnboundedReceiver<T> {
 /// A borrowing handle for receiving elements through a split unbounded
 /// [`UnboundedChannel`].
 pub struct UnboundedReceiverRef<'a, T> {
-    shared: &'a UnboundedQueue<T>,
+    queue: &'a UnboundedQueue<T>,
 }
 
 impl<T> UnboundedReceiverRef<'_, T> {
     /// Closes the channel, ensuring that all subsequent sends will fail.
     pub fn close(&mut self) {
-        self.shared.close::<COUNTED>();
+        self.queue.close::<COUNTED>();
     }
 
     /// Returns the number of queued elements.
     pub fn len(&self) -> usize {
-        self.shared.len()
+        self.queue.len()
     }
 
     /// Returns `true` if the channel is closed.
     pub fn is_closed(&self) -> bool {
-        self.shared.is_closed::<COUNTED>()
+        self.queue.is_closed::<COUNTED>()
     }
 
     /// Returns `true` if the channel is empty.
     pub fn is_empty(&self) -> bool {
-        self.shared.len() == 0
+        self.queue.len() == 0
     }
 
     /// Receives an element through the channel.
@@ -396,14 +396,14 @@ impl<T> UnboundedReceiverRef<'_, T> {
     ///
     /// Fails, if the channel is empty or disconnected.
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
-        self.shared.try_recv::<COUNTED>()
+        self.queue.try_recv::<COUNTED>()
     }
 
     /// Polls the channel, resolving if an element was received or the channel
     /// is closed, ignoring whether there are any remaining **Sender**(s) or
     /// not.
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
-        self.shared.poll_recv::<COUNTED>(cx)
+        self.queue.poll_recv::<COUNTED>(cx)
     }
 
     /// Receives an element through the channel.
@@ -412,13 +412,13 @@ impl<T> UnboundedReceiverRef<'_, T> {
     ///
     /// Fails, if the channel is closed (i.e., all senders have been dropped).
     pub async fn recv(&mut self) -> Option<T> {
-        self.shared.recv::<COUNTED>().await
+        self.queue.recv::<COUNTED>().await
     }
 }
 
 impl<T> Drop for UnboundedReceiverRef<'_, T> {
     fn drop(&mut self) {
-        self.shared.close::<COUNTED>();
+        self.queue.close::<COUNTED>();
     }
 }
 

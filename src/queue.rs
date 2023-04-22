@@ -29,32 +29,32 @@ where
     }
 
     pub(crate) fn len(&self) -> usize {
-        // SAFETY: no mutable or aliased access to shared possible
+        // SAFETY: no mutable or aliased access to queue possible
         unsafe { (*self.0.get()).queue.len() }
     }
 
     pub(crate) fn close<const COUNTED: bool>(&self) {
-        // SAFETY: no mutable or aliased access to shared possible
+        // SAFETY: no mutable or aliased access to queue possible
         unsafe { &mut *self.0.get() }.close::<COUNTED>();
     }
 
     pub(crate) fn is_closed<const COUNTED: bool>(&self) -> bool {
-        // SAFETY: no mutable or aliased access to shared possible
+        // SAFETY: no mutable or aliased access to queue possible
         unsafe { (*self.0.get()).mask.is_closed::<COUNTED>() }
     }
 
     pub(crate) fn try_recv<const COUNTED: bool>(&self) -> Result<T, TryRecvError> {
-        // SAFETY: no mutable or aliased access to shared possible
+        // SAFETY: no mutable or aliased access to queue possible
         unsafe { (*self.0.get()).try_recv::<COUNTED>() }
     }
 
     pub(crate) fn poll_recv<const COUNTED: bool>(&self, cx: &mut Context<'_>) -> Poll<Option<T>> {
-        // SAFETY: no mutable or aliased access to shared possible
+        // SAFETY: no mutable or aliased access to queue possible
         unsafe { (*self.0.get()).poll_recv::<COUNTED>(cx) }
     }
 
     pub(crate) async fn recv<const COUNTED: bool>(&self) -> Option<T> {
-        RecvFuture::<'_, _, _, COUNTED> { shared: &self.0 }.await
+        RecvFuture::<'_, _, _, COUNTED> { queue: &self.0 }.await
     }
 }
 
@@ -68,16 +68,16 @@ impl<T> UnsyncQueue<T, Unbounded> {
     }
 
     pub(crate) fn send<const COUNTED: bool>(&self, elem: T) -> Result<(), SendError<T>> {
-        // SAFETY: no mutable or aliased access to shared possible
-        let shared = unsafe { &mut *self.0.get() };
+        // SAFETY: no mutable or aliased access to queue possible
+        let queue = unsafe { &mut *self.0.get() };
 
         // check if the channel was closed
-        if shared.mask.is_closed::<COUNTED>() {
+        if queue.mask.is_closed::<COUNTED>() {
             return Err(SendError(elem));
         }
 
         // ..otherwise push `elem` and wake a potential waiter
-        shared.push_and_wake(elem);
+        queue.push_and_wake(elem);
         Ok(())
     }
 }
@@ -122,31 +122,31 @@ impl<T> UnsyncQueue<T, Bounded> {
     }
 
     pub(crate) fn max_capacity(&self) -> usize {
-        // SAFETY: no mutable or aliased access to shared possible
+        // SAFETY: no mutable or aliased access to queue possible
         unsafe { (*self.0.get()).extra.max_capacity }
     }
 
     pub(crate) fn capacity(&self) -> usize {
-        // SAFETY: no mutable or aliased access to shared possible
+        // SAFETY: no mutable or aliased access to queue possible
         unsafe { (*self.0.get()).extra.semaphore.available_permits() }
     }
 
     pub(crate) fn unbounded_send<const CAPACITY_REDUCING: bool>(&self, elem: T) {
-        // SAFETY: no mutable or aliased access to shared possible
-        let shared = unsafe { &mut *self.0.get() };
+        // SAFETY: no mutable or aliased access to queue possible
+        let queue = unsafe { &mut *self.0.get() };
         if CAPACITY_REDUCING {
-            shared.extra.semaphore.remove_permits(1);
+            queue.extra.semaphore.remove_permits(1);
         }
 
-        shared.push_and_wake(elem);
+        queue.push_and_wake(elem);
     }
 
     pub(crate) fn try_send<const COUNTED: bool>(&self, elem: T) -> Result<(), TrySendError<T>> {
-        // SAFETY: no mutable or aliased access to shared possible
-        let shared = unsafe { &mut *self.0.get() };
+        // SAFETY: no mutable or aliased access to queue possible
+        let queue = unsafe { &mut *self.0.get() };
 
         // check if there is room in the channel and the channel is still open
-        let permit = match shared.extra.semaphore.try_acquire() {
+        let permit = match queue.extra.semaphore.try_acquire() {
             Ok(permit) => permit,
             Err(e) => return Err((e, elem).into()),
         };
@@ -156,16 +156,16 @@ impl<T> UnsyncQueue<T, Bounded> {
         // The order (i.e., forget first) is somewhat important, because `wake`
         // might panic (which can be caught), but only after `elem` is pushed.
         permit.forget();
-        shared.push_and_wake(elem);
+        queue.push_and_wake(elem);
 
         Ok(())
     }
 
-    /// Performs a bounded send through the given `shared`.
+    /// Performs a bounded send.
     pub(crate) async fn send<const COUNTED: bool>(&self, elem: T) -> Result<(), SendError<T>> {
         // try to acquire a free slot in the queue
         let ptr = self.0.get();
-        // SAFETY: no mutable or aliased access to shared possible (a mutable
+        // SAFETY: no mutable or aliased access to queue possible (a mutable
         // reference **MUST NOT** be held across the await!)
         let Ok(permit) = unsafe { (*ptr).extra.semaphore.acquire() }.await else {
             return Err(SendError(elem))
@@ -176,22 +176,22 @@ impl<T> UnsyncQueue<T, Bounded> {
         // The order, i.e., forget first, is somewhat important, because `wake`
         // might panic (which can be caught), but only after `elem` is pushed.
         permit.forget();
-        // SAFETY: no mutable or aliased access to shared possible
+        // SAFETY: no mutable or aliased access to queue possible
         unsafe { (*ptr).push_and_wake(elem) };
 
         Ok(())
     }
 
     pub(crate) fn try_reserve<const COUNTED: bool>(&self) -> Result<(), TrySendError<()>> {
-        // SAFETY: no mutable or aliased access to shared possible
-        let shared = unsafe { &mut *self.0.get() };
+        // SAFETY: no mutable or aliased access to queue possible
+        let queue = unsafe { &mut *self.0.get() };
 
         // check if there is room in the channel and the channel is still open
-        let permit = shared.extra.semaphore.try_acquire()?;
+        let permit = queue.extra.semaphore.try_acquire()?;
 
         // Forgetting the permit permanently decreases the number of
         // available permits. This (semaphore) permit is later "revived"
-        // when the returned (shared/channel) permit is dropped, so that the
+        // when the returned (queue/channel) permit is dropped, so that the
         // semaphore's permit count is correctly increased. This is done to
         // avoid storing an additional (redundant) reference in the `Permit`
         // struct.
@@ -202,7 +202,7 @@ impl<T> UnsyncQueue<T, Bounded> {
     pub(crate) async fn reserve<const COUNTED: bool>(&self) -> Result<(), SendError<()>> {
         // acquire a free slot in the queue
         let ptr = self.0.get();
-        // SAFETY: no mutable or aliased access to shared possible (a mutable
+        // SAFETY: no mutable or aliased access to queue possible (a mutable
         // reference **MUST NOT** be held across the await!)
         let Ok(permit) = unsafe { (*ptr).extra.semaphore.acquire() }.await else {
             return Err(SendError(()))
@@ -210,7 +210,7 @@ impl<T> UnsyncQueue<T, Bounded> {
 
         // Forgetting the permit permanently decreases the number of
         // available permits. This (semaphore) permit is later "revived"
-        // when the returned (shared/channel) permit is dropped, so that the
+        // when the returned (queue/channel) permit is dropped, so that the
         // semaphore's permit count is correctly increased. This is done to
         // avoid storing an additional (redundant) reference in the `Permit`
         // struct.
@@ -219,13 +219,13 @@ impl<T> UnsyncQueue<T, Bounded> {
     }
 
     pub(crate) fn unreserve(&self) {
-        // SAFETY: no mutable or aliased access to shared possible
+        // SAFETY: no mutable or aliased access to queue possible
         drop(unsafe { (*self.0.get()).extra.semaphore.make_permit(1) });
     }
 
     #[cfg(test)]
     pub(crate) fn outstanding_permits(&self) -> usize {
-        // SAFETY: no mutable or aliased access to shared possible
+        // SAFETY: no mutable or aliased access to queue possible
         unsafe { (*self.0.get()).extra.semaphore.outstanding_permits() }
     }
 }
@@ -431,7 +431,7 @@ impl Bounded {
 
 /// The [`Future`] for receiving an element through the channel.
 pub(crate) struct RecvFuture<'a, T, B, const COUNTED: bool> {
-    pub(crate) shared: &'a UnsafeCell<Queue<T, B>>,
+    pub(crate) queue: &'a UnsafeCell<Queue<T, B>>,
 }
 
 impl<T, B, const COUNTED: bool> Future for RecvFuture<'_, T, B, COUNTED>
@@ -441,8 +441,8 @@ where
     type Output = Option<T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // SAFETY: no mutable or aliased access to shared possible
-        let shared = self.get_mut().shared;
-        unsafe { (*shared.get()).poll_recv::<COUNTED>(cx) }
+        // SAFETY: no mutable or aliased access to queue possible
+        let queue = self.get_mut().queue;
+        unsafe { (*queue.get()).poll_recv::<COUNTED>(cx) }
     }
 }

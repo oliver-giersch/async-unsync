@@ -19,7 +19,7 @@ use crate::{
 /// Panics, if `capacity` is zero.
 pub const fn channel<T>(capacity: usize) -> Channel<T> {
     assert!(capacity > 0, "channel capacity must be at least 1");
-    Channel { shared: BoundedQueue::new(capacity) }
+    Channel { queue: BoundedQueue::new(capacity) }
 }
 
 /// Returns a new bounded channel with pre-queued elements.
@@ -44,7 +44,7 @@ pub fn channel_from_iter<T>(capacity: usize, iter: impl IntoIterator<Item = T>) 
 /// Any further sends will have to wait (block), until capacity is restored by
 /// [receiving](Channel::recv) already stored values.
 pub struct Channel<T> {
-    shared: BoundedQueue<T>,
+    queue: BoundedQueue<T>,
 }
 
 impl<T> Channel<T> {
@@ -54,7 +54,7 @@ impl<T> Channel<T> {
     ///
     /// Panics, if `capacity` is zero.
     pub fn with_initial_capacity(capacity: usize, initial: usize) -> Self {
-        Self { shared: BoundedQueue::with_capacity(capacity, initial) }
+        Self { queue: BoundedQueue::with_capacity(capacity, initial) }
     }
 
     /// Returns a new bounded channel with pre-queued elements.
@@ -68,7 +68,7 @@ impl<T> Channel<T> {
     ///
     /// Panics, if `capacity` is zero.
     pub fn from_iter(capacity: usize, iter: impl IntoIterator<Item = T>) -> Self {
-        Self { shared: BoundedQueue::from_iter(capacity, iter) }
+        Self { queue: BoundedQueue::from_iter(capacity, iter) }
     }
 
     /// Splits the channel into borrowing [`SenderRef`] and [`ReceiverRef`]
@@ -95,8 +95,8 @@ impl<T> Channel<T> {
     /// # }
     /// ```
     pub fn split(&mut self) -> (SenderRef<'_, T>, ReceiverRef<'_, T>) {
-        self.shared.0.get_mut().set_counted();
-        (SenderRef { shared: &self.shared }, ReceiverRef { shared: &self.shared })
+        self.queue.0.get_mut().set_counted();
+        (SenderRef { queue: &self.queue }, ReceiverRef { queue: &self.queue })
     }
 
     /// Consumes and splits the channel into owning [`Sender`] and [`Receiver`]
@@ -107,14 +107,14 @@ impl<T> Channel<T> {
     /// restrictions, since the returned handles are valid for the `'static`
     /// lifetime, meaning they can be used in spawned (local) tasks.
     pub fn into_split(mut self) -> (Sender<T>, Receiver<T>) {
-        self.shared.0.get_mut().set_counted();
-        let shared = Rc::new(self.shared);
-        (Sender { shared: Rc::clone(&shared) }, Receiver { shared })
+        self.queue.0.get_mut().set_counted();
+        let queue = Rc::new(self.queue);
+        (Sender { queue: Rc::clone(&queue) }, Receiver { queue })
     }
 
     /// Converts into the underlying [`VecDeque`] container.
     pub fn into_deque(self) -> VecDeque<T> {
-        self.shared.into_deque()
+        self.queue.into_deque()
     }
 
     /// Returns the number of queued elements.
@@ -124,7 +124,7 @@ impl<T> Channel<T> {
     /// This will occur, when capacity is decreased by [reserving](Channel::reserve)
     /// it without using it right away.
     pub fn len(&self) -> usize {
-        self.shared.len()
+        self.queue.len()
     }
 
     /// Returns the maximum buffer capacity of the channel.
@@ -132,7 +132,7 @@ impl<T> Channel<T> {
     /// This is the capacity initially specified when [creating](channel) the
     /// channel and remains constant.
     pub fn max_capacity(&self) -> usize {
-        self.shared.max_capacity()
+        self.queue.max_capacity()
     }
 
     /// Returns the current capacity of the channel.
@@ -142,7 +142,7 @@ impl<T> Channel<T> {
     /// When the capacity is zero, any subsequent sends will only resolve once
     /// sufficient capacity is available
     pub fn capacity(&self) -> usize {
-        self.shared.capacity()
+        self.queue.capacity()
     }
 
     /// Closes the channel, ensuring that all subsequent sends will fail.
@@ -157,17 +157,17 @@ impl<T> Channel<T> {
     /// assert_eq!(chan.try_send(1), Err(TrySendError::Closed(1)));
     /// ```
     pub fn close(&self) {
-        self.shared.close::<UNCOUNTED>();
+        self.queue.close::<UNCOUNTED>();
     }
 
     /// Returns `true` if the channel is closed.
     pub fn is_closed(&self) -> bool {
-        self.shared.is_closed::<UNCOUNTED>()
+        self.queue.is_closed::<UNCOUNTED>()
     }
 
     /// Returns `true` if the channel is empty.
     pub fn is_empty(&self) -> bool {
-        self.shared.len() == 0
+        self.queue.len() == 0
     }
 
     /// Receives an element through the channel.
@@ -177,7 +177,7 @@ impl<T> Channel<T> {
     /// Fails, if the channel is [empty](TryRecvError::Empty) or
     /// [disconnected](TryRecvError::Disconnected).
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        self.shared.try_recv::<UNCOUNTED>()
+        self.queue.try_recv::<UNCOUNTED>()
     }
 
     /// Polls the channel, resolving if an element was received or the channel
@@ -192,7 +192,7 @@ impl<T> Channel<T> {
     /// In order to avoid this, there should be only one logical receiver per
     /// each channel.
     pub fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Option<T>> {
-        self.shared.poll_recv::<UNCOUNTED>(cx)
+        self.queue.poll_recv::<UNCOUNTED>(cx)
     }
 
     /// Receives an element through the channel.
@@ -201,7 +201,7 @@ impl<T> Channel<T> {
     ///
     /// Fails, if the channel is closed (i.e., all senders have been dropped).
     pub async fn recv(&self) -> Option<T> {
-        self.shared.recv::<UNCOUNTED>().await
+        self.queue.recv::<UNCOUNTED>().await
     }
 
     /// Sends a value through the channel if there is sufficient capacity.
@@ -210,7 +210,7 @@ impl<T> Channel<T> {
     ///
     /// Fails, if the queue is closed or there is no available capacity.
     pub fn try_send(&self, elem: T) -> Result<(), TrySendError<T>> {
-        self.shared.try_send::<UNCOUNTED>(elem)
+        self.queue.try_send::<UNCOUNTED>(elem)
     }
 
     /// Sends a value through the channel, ignoring any capacity constraints.
@@ -232,7 +232,7 @@ impl<T> Channel<T> {
             return Err(SendError(elem));
         }
 
-        self.shared.unbounded_send::<CAPACITY_REDUCING>(elem);
+        self.queue.unbounded_send::<CAPACITY_REDUCING>(elem);
         Ok(())
     }
 
@@ -242,7 +242,7 @@ impl<T> Channel<T> {
     ///
     /// Fails, if the queue is closed.
     pub async fn send(&self, elem: T) -> Result<(), SendError<T>> {
-        self.shared.send::<UNCOUNTED>(elem).await
+        self.queue.send::<UNCOUNTED>(elem).await
     }
 
     /// Attempts to reserve a slot in the channel without blocking, if none are
@@ -275,8 +275,8 @@ impl<T> Channel<T> {
     /// # }
     /// ```
     pub fn try_reserve(&self) -> Result<Permit<'_, T>, TrySendError<()>> {
-        self.shared.try_reserve::<COUNTED>()?;
-        Ok(Permit { shared: &self.shared })
+        self.queue.try_reserve::<COUNTED>()?;
+        Ok(Permit { queue: &self.queue })
     }
 
     /// Attempts to reserve a slot in the channel without blocking.
@@ -310,8 +310,8 @@ impl<T> Channel<T> {
     /// # }
     /// ```
     pub async fn reserve(&self) -> Result<Permit<'_, T>, SendError<()>> {
-        self.shared.reserve::<UNCOUNTED>().await?;
-        Ok(Permit { shared: &self.shared })
+        self.queue.reserve::<UNCOUNTED>().await?;
+        Ok(Permit { queue: &self.queue })
     }
 }
 
@@ -327,13 +327,13 @@ impl<T> fmt::Debug for Channel<T> {
 
 /// An owned handle for sending elements through a bounded split [`Channel`].
 pub struct Sender<T> {
-    shared: Rc<BoundedQueue<T>>,
+    queue: Rc<BoundedQueue<T>>,
 }
 
 impl<T> Sender<T> {
     /// Returns the number of currently queued elements.
     pub fn len(&self) -> usize {
-        self.shared.len()
+        self.queue.len()
     }
 
     /// Returns the maximum buffer capacity of the channel.
@@ -341,7 +341,7 @@ impl<T> Sender<T> {
     /// This is the capacity initially specified when [creating](channel) the
     /// channel and remains constant.
     pub fn max_capacity(&self) -> usize {
-        self.shared.max_capacity()
+        self.queue.max_capacity()
     }
 
     /// Returns the current capacity of the channel.
@@ -351,23 +351,23 @@ impl<T> Sender<T> {
     /// When the capacity is zero, any subsequent sends will only resolve once
     /// sufficient capacity is available
     pub fn capacity(&self) -> usize {
-        self.shared.capacity()
+        self.queue.capacity()
     }
 
     /// Returns `true` if the channel is closed.
     pub fn is_closed(&self) -> bool {
-        self.shared.is_closed::<COUNTED>()
+        self.queue.is_closed::<COUNTED>()
     }
 
     /// Returns `true` if the channel is empty.
     pub fn is_empty(&self) -> bool {
-        self.shared.len() == 0
+        self.queue.len() == 0
     }
 
     /// Returns `true` if `self` and `other` are handles for the same channel
     /// instance.
     pub fn same_channel(&self, other: &Self) -> bool {
-        core::ptr::eq(Rc::as_ptr(&self.shared), Rc::as_ptr(&other.shared))
+        core::ptr::eq(Rc::as_ptr(&self.queue), Rc::as_ptr(&other.queue))
     }
 
     /// Sends a value through the channel if there is sufficient capacity.
@@ -376,7 +376,7 @@ impl<T> Sender<T> {
     ///
     /// Fails, if the queue is closed or there is no available capacity.
     pub fn try_send(&self, elem: T) -> Result<(), TrySendError<T>> {
-        self.shared.try_send::<COUNTED>(elem)
+        self.queue.try_send::<COUNTED>(elem)
     }
 
     /// Sends a value through the channel, ignoring any capacity constraints.
@@ -398,7 +398,7 @@ impl<T> Sender<T> {
             return Err(SendError(elem));
         }
 
-        self.shared.unbounded_send::<CAPACITY_REDUCING>(elem);
+        self.queue.unbounded_send::<CAPACITY_REDUCING>(elem);
         Ok(())
     }
 
@@ -409,7 +409,7 @@ impl<T> Sender<T> {
     ///
     /// Fails, if the queue is closed.
     pub async fn send(&self, elem: T) -> Result<(), SendError<T>> {
-        self.shared.send::<COUNTED>(elem).await
+        self.queue.send::<COUNTED>(elem).await
     }
 
     /// Attempts to reserve a slot in the channel without blocking, if none are
@@ -442,8 +442,8 @@ impl<T> Sender<T> {
     /// # }
     /// ```
     pub fn try_reserve(&self) -> Result<Permit<'_, T>, TrySendError<()>> {
-        self.shared.try_reserve::<COUNTED>()?;
-        Ok(Permit { shared: &self.shared })
+        self.queue.try_reserve::<COUNTED>()?;
+        Ok(Permit { queue: &self.queue })
     }
 
     /// Attempts to reserve a slot in the channel without blocking, if none are
@@ -484,7 +484,7 @@ impl<T> Sender<T> {
     /// # }
     /// ```
     pub fn try_reserve_owned(self) -> Result<OwnedPermit<T>, TrySendError<Self>> {
-        if let Err(err) = self.shared.try_reserve::<COUNTED>() {
+        if let Err(err) = self.queue.try_reserve::<COUNTED>() {
             return Err(err.set(self));
         }
 
@@ -522,8 +522,8 @@ impl<T> Sender<T> {
     /// # }
     /// ```
     pub async fn reserve(&self) -> Result<Permit<'_, T>, SendError<()>> {
-        self.shared.reserve::<COUNTED>().await?;
-        Ok(Permit { shared: &self.shared })
+        self.queue.reserve::<COUNTED>().await?;
+        Ok(Permit { queue: &self.queue })
     }
 
     /// Attempts to reserve a slot in the channel without blocking.
@@ -557,7 +557,7 @@ impl<T> Sender<T> {
     /// # }
     /// ```
     pub async fn reserve_owned(self) -> Result<OwnedPermit<T>, SendError<Self>> {
-        if self.shared.reserve::<COUNTED>().await.is_err() {
+        if self.queue.reserve::<COUNTED>().await.is_err() {
             return Err(SendError(self));
         }
 
@@ -567,16 +567,16 @@ impl<T> Sender<T> {
 
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.0.get()).mask.increase_sender_count() };
-        Self { shared: Rc::clone(&self.shared) }
+        // SAFETY: no mutable or aliased access to queue possible
+        unsafe { (*self.queue.0.get()).mask.increase_sender_count() };
+        Self { queue: Rc::clone(&self.queue) }
     }
 }
 
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.0.get()).decrease_sender_count() };
+        // SAFETY: no mutable or aliased access to queue possible
+        unsafe { (*self.queue.0.get()).decrease_sender_count() };
     }
 }
 
@@ -592,13 +592,13 @@ impl<T> fmt::Debug for Sender<T> {
 
 /// A borrowing handle for sending elements through a bounded split [`Channel`].
 pub struct SenderRef<'a, T> {
-    shared: &'a BoundedQueue<T>,
+    queue: &'a BoundedQueue<T>,
 }
 
 impl<T> SenderRef<'_, T> {
     /// Returns the number of queued elements.
     pub fn len(&self) -> usize {
-        self.shared.len()
+        self.queue.len()
     }
 
     /// Returns the maximum buffer capacity of the channel.
@@ -606,7 +606,7 @@ impl<T> SenderRef<'_, T> {
     /// This is the capacity initially specified when [creating](channel) the
     /// channel and remains constant.
     pub fn max_capacity(&self) -> usize {
-        self.shared.max_capacity()
+        self.queue.max_capacity()
     }
 
     /// Returns the current capacity of the channel.
@@ -616,23 +616,23 @@ impl<T> SenderRef<'_, T> {
     /// When the capacity is zero, any subsequent sends will only resolve once
     /// sufficient capacity is available
     pub fn capacity(&self) -> usize {
-        self.shared.capacity()
+        self.queue.capacity()
     }
 
     /// Returns `true` if the channel is closed.
     pub fn is_closed(&self) -> bool {
-        self.shared.is_closed::<COUNTED>()
+        self.queue.is_closed::<COUNTED>()
     }
 
     /// Returns `true` if the channel is empty.
     pub fn is_empty(&self) -> bool {
-        self.shared.len() == 0
+        self.queue.len() == 0
     }
 
     /// Returns `true` if `self` and `other` are handles for the same channel
     /// instance.
     pub fn same_channel(&self, other: &Self) -> bool {
-        core::ptr::eq(&self.shared, &other.shared)
+        core::ptr::eq(&self.queue, &other.queue)
     }
 
     /// Sends a value through the channel if there is sufficient capacity.
@@ -641,7 +641,7 @@ impl<T> SenderRef<'_, T> {
     ///
     /// Fails, if the queue is closed or there is no available capacity.
     pub fn try_send(&self, elem: T) -> Result<(), TrySendError<T>> {
-        self.shared.try_send::<COUNTED>(elem)
+        self.queue.try_send::<COUNTED>(elem)
     }
 
     /// Sends a value through the channel, ignoring any capacity constraints.
@@ -663,7 +663,7 @@ impl<T> SenderRef<'_, T> {
             return Err(SendError(elem));
         }
 
-        self.shared.unbounded_send::<CAPACITY_REDUCING>(elem);
+        self.queue.unbounded_send::<CAPACITY_REDUCING>(elem);
         Ok(())
     }
 
@@ -674,7 +674,7 @@ impl<T> SenderRef<'_, T> {
     ///
     /// Fails, if the queue is closed.
     pub async fn send(&self, elem: T) -> Result<(), SendError<T>> {
-        self.shared.send::<COUNTED>(elem).await
+        self.queue.send::<COUNTED>(elem).await
     }
 
     /// Attempts to reserve a slot in the channel without blocking, if none are
@@ -708,8 +708,8 @@ impl<T> SenderRef<'_, T> {
     /// # }
     /// ```
     pub fn try_reserve(&self) -> Result<Permit<'_, T>, TrySendError<()>> {
-        self.shared.try_reserve::<COUNTED>()?;
-        Ok(Permit { shared: self.shared })
+        self.queue.try_reserve::<COUNTED>()?;
+        Ok(Permit { queue: self.queue })
     }
 
     /// Attempts to reserve a slot in the channel without blocking.
@@ -744,23 +744,23 @@ impl<T> SenderRef<'_, T> {
     /// # }
     /// ```
     pub async fn reserve(&self) -> Result<Permit<'_, T>, SendError<()>> {
-        self.shared.reserve::<COUNTED>().await?;
-        Ok(Permit { shared: self.shared })
+        self.queue.reserve::<COUNTED>().await?;
+        Ok(Permit { queue: self.queue })
     }
 }
 
 impl<T> Clone for SenderRef<'_, T> {
     fn clone(&self) -> Self {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.0.get()).mask.increase_sender_count() };
-        Self { shared: self.shared }
+        // SAFETY: no mutable or aliased access to queue possible
+        unsafe { (*self.queue.0.get()).mask.increase_sender_count() };
+        Self { queue: self.queue }
     }
 }
 
 impl<T> Drop for SenderRef<'_, T> {
     fn drop(&mut self) {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.0.get()).decrease_sender_count() };
+        // SAFETY: no mutable or aliased access to queue possible
+        unsafe { (*self.queue.0.get()).decrease_sender_count() };
     }
 }
 
@@ -776,18 +776,18 @@ impl<T> fmt::Debug for SenderRef<'_, T> {
 
 /// An owning handle for receiving elements through a split bounded [`Channel`].
 pub struct Receiver<T> {
-    shared: Rc<BoundedQueue<T>>,
+    queue: Rc<BoundedQueue<T>>,
 }
 
 impl<T> Receiver<T> {
     /// Closes the channel, ensuring that all subsequent sends will fail.
     pub fn close(&mut self) {
-        self.shared.close::<COUNTED>();
+        self.queue.close::<COUNTED>();
     }
 
     /// Returns the number of queued elements.
     pub fn len(&self) -> usize {
-        self.shared.len()
+        self.queue.len()
     }
 
     /// Returns the maximum buffer capacity of the channel.
@@ -795,7 +795,7 @@ impl<T> Receiver<T> {
     /// This is the capacity initially specified when [creating](channel) the
     /// channel and remains constant.
     pub fn max_capacity(&self) -> usize {
-        self.shared.max_capacity()
+        self.queue.max_capacity()
     }
 
     /// Returns the current capacity of the channel.
@@ -805,17 +805,17 @@ impl<T> Receiver<T> {
     /// When the capacity is zero, any subsequent sends will only resolve once
     /// sufficient capacity is available
     pub fn capacity(&self) -> usize {
-        self.shared.capacity()
+        self.queue.capacity()
     }
 
     /// Returns `true` if the channel is closed.
     pub fn is_closed(&self) -> bool {
-        self.shared.is_closed::<COUNTED>()
+        self.queue.is_closed::<COUNTED>()
     }
 
     /// Returns `true` if the channel is empty.
     pub fn is_empty(&self) -> bool {
-        self.shared.len() == 0
+        self.queue.len() == 0
     }
 
     /// Attempts to receive an element through the channel.
@@ -825,14 +825,14 @@ impl<T> Receiver<T> {
     /// Fails, if the channel is [empty](TryRecvError::Empty) or
     /// [disconnected](TryRecvError::Disconnected).
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
-        self.shared.try_recv::<COUNTED>()
+        self.queue.try_recv::<COUNTED>()
     }
 
     /// Polls the channel, resolving if an element was received or the channel
     /// is closed but ignoring whether there are any remaining **Sender**(s) or
     /// not.
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
-        self.shared.poll_recv::<COUNTED>(cx)
+        self.queue.poll_recv::<COUNTED>(cx)
     }
 
     /// Receives an element through the channel.
@@ -842,13 +842,13 @@ impl<T> Receiver<T> {
     /// Fails, if the channel is [empty](TryRecvError::Empty) or
     /// [disconnected](TryRecvError::Disconnected).
     pub async fn recv(&mut self) -> Option<T> {
-        self.shared.recv::<COUNTED>().await
+        self.queue.recv::<COUNTED>().await
     }
 }
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        self.shared.close::<COUNTED>();
+        self.queue.close::<COUNTED>();
     }
 }
 
@@ -864,18 +864,18 @@ impl<T> fmt::Debug for Receiver<T> {
 
 /// A borrowing handle for receiving elements through a split bounded [`Channel`].
 pub struct ReceiverRef<'a, T> {
-    shared: &'a BoundedQueue<T>,
+    queue: &'a BoundedQueue<T>,
 }
 
 impl<T> ReceiverRef<'_, T> {
     /// Closes the channel, ensuring that all subsequent sends will fail.
     pub fn close(&mut self) {
-        self.shared.close::<COUNTED>();
+        self.queue.close::<COUNTED>();
     }
 
     /// Returns the number of queued elements.
     pub fn len(&self) -> usize {
-        self.shared.len()
+        self.queue.len()
     }
 
     /// Returns the maximum buffer capacity of the channel.
@@ -883,7 +883,7 @@ impl<T> ReceiverRef<'_, T> {
     /// This is the capacity initially specified when [creating](channel) the
     /// channel and remains constant.
     pub fn max_capacity(&self) -> usize {
-        self.shared.max_capacity()
+        self.queue.max_capacity()
     }
 
     /// Returns the current capacity of the channel.
@@ -893,17 +893,17 @@ impl<T> ReceiverRef<'_, T> {
     /// When the capacity is zero, any subsequent sends will only resolve once
     /// sufficient capacity is available
     pub fn capacity(&self) -> usize {
-        self.shared.capacity()
+        self.queue.capacity()
     }
 
     /// Returns `true` if the channel is closed.
     pub fn is_closed(&self) -> bool {
-        self.shared.is_closed::<COUNTED>()
+        self.queue.is_closed::<COUNTED>()
     }
 
     /// Returns `true` if the channel is empty.
     pub fn is_empty(&self) -> bool {
-        self.shared.len() == 0
+        self.queue.len() == 0
     }
 
     /// Receives an element through the channel.
@@ -913,14 +913,14 @@ impl<T> ReceiverRef<'_, T> {
     /// Fails, if the channel is [empty](TryRecvError::Empty) or
     /// [disconnected](TryRecvError::Disconnected).
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
-        self.shared.try_recv::<COUNTED>()
+        self.queue.try_recv::<COUNTED>()
     }
 
     /// Polls the channel, resolving if an element was received or the channel
     /// is closed, ignoring whether there are any remaining **Sender**(s) or
     /// not.
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
-        self.shared.poll_recv::<COUNTED>(cx)
+        self.queue.poll_recv::<COUNTED>(cx)
     }
 
     /// Receives an element through the channel.
@@ -929,13 +929,13 @@ impl<T> ReceiverRef<'_, T> {
     ///
     /// Fails, if the channel is closed (i.e., all senders have been dropped).
     pub async fn recv(&mut self) -> Option<T> {
-        self.shared.recv::<COUNTED>().await
+        self.queue.recv::<COUNTED>().await
     }
 }
 
 impl<T> Drop for ReceiverRef<'_, T> {
     fn drop(&mut self) {
-        self.shared.close::<COUNTED>();
+        self.queue.close::<COUNTED>();
     }
 }
 
@@ -951,7 +951,7 @@ impl<T> fmt::Debug for ReceiverRef<'_, T> {
 
 /// A borrowing permit to send one value into the channel.
 pub struct Permit<'a, T> {
-    shared: &'a BoundedQueue<T>,
+    queue: &'a BoundedQueue<T>,
 }
 
 impl<T> Permit<'_, T> {
@@ -964,14 +964,14 @@ impl<T> Permit<'_, T> {
         // must not reduce capacity again (done during reservation)
         const CAPACITY_REDUCING: bool = false;
 
-        self.shared.unbounded_send::<CAPACITY_REDUCING>(elem);
+        self.queue.unbounded_send::<CAPACITY_REDUCING>(elem);
         mem::forget(self);
     }
 }
 
 impl<T> Drop for Permit<'_, T> {
     fn drop(&mut self) {
-        self.shared.unreserve();
+        self.queue.unreserve();
     }
 }
 
@@ -1000,7 +1000,7 @@ impl<T> OwnedPermit<T> {
         const CAPACITY_REDUCING: bool = false;
 
         let sender = self.sender.take().unwrap_or_else(|| unreachable!());
-        sender.shared.unbounded_send::<CAPACITY_REDUCING>(elem);
+        sender.queue.unbounded_send::<CAPACITY_REDUCING>(elem);
         sender
     }
 }
@@ -1008,7 +1008,7 @@ impl<T> OwnedPermit<T> {
 impl<T> Drop for OwnedPermit<T> {
     fn drop(&mut self) {
         if let Some(sender) = self.sender.take() {
-            sender.shared.unreserve();
+            sender.queue.unreserve();
         }
     }
 }
@@ -1065,8 +1065,8 @@ mod tests {
                 assert!(tx.send(i).await.is_ok());
             }
 
-            let shared = &rx.shared.0;
-            let fut = RecvFuture::<'_, _, _, true> { shared };
+            let queue = &rx.queue.0;
+            let fut = RecvFuture::<'_, _, _, true> { queue };
             futures_lite::pin!(fut);
 
             assert_eq!((&mut fut).await, Some(0));
@@ -1305,7 +1305,7 @@ mod tests {
             let permit = tx.reserve().await.unwrap();
             assert_eq!(tx.capacity(), 0);
             assert_eq!(tx.max_capacity(), 1);
-            assert_eq!(tx.shared.outstanding_permits(), 0, "reservation forgets permit");
+            assert_eq!(tx.queue.outstanding_permits(), 0, "reservation forgets permit");
 
             rx.close();
             core::future::poll_fn(|cx| {
@@ -1437,12 +1437,12 @@ mod tests {
 
             assert_eq!(rx.recv().await, Some(-1));
             assert_eq!(tx.capacity(), 0, "capacity goes to f1");
-            assert_eq!(tx.shared.outstanding_permits(), 1);
+            assert_eq!(tx.queue.outstanding_permits(), 1);
 
             assert_eq!(rx.recv().await, Some(-99));
             assert_eq!(rx.recv().await, Some(-99));
             assert_eq!(tx.capacity(), 0, "capacity goes to f1");
-            assert_eq!(tx.shared.outstanding_permits(), 1);
+            assert_eq!(tx.queue.outstanding_permits(), 1);
 
             assert!(f1.await.is_ok());
             assert_eq!(tx.capacity(), 0, "capacity goes to f2");
@@ -1451,19 +1451,19 @@ mod tests {
             assert_eq!(rx.recv().await, Some(-99));
             assert_eq!(rx.recv().await, Some(-2));
 
-            assert_eq!(tx.shared.outstanding_permits(), 1);
+            assert_eq!(tx.queue.outstanding_permits(), 1);
             assert_eq!(tx.capacity(), 0, "capacity goes to f3");
 
             drop(f2);
             assert_eq!(tx.capacity(), 0, "capacity goes to f3");
-            assert_eq!(tx.shared.outstanding_permits(), 1);
+            assert_eq!(tx.queue.outstanding_permits(), 1);
 
             f3.await.unwrap().send(-4);
             assert_eq!(tx.capacity(), 0);
 
             assert_eq!(rx.recv().await, Some(-4));
             assert_eq!(tx.capacity(), 1);
-            assert_eq!(tx.shared.outstanding_permits(), 0);
+            assert_eq!(tx.queue.outstanding_permits(), 0);
         });
     }
 }

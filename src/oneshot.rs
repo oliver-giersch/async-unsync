@@ -15,7 +15,7 @@ use crate::error::{SendError, TryRecvError};
 
 /// Creates a new oneshot channel.
 pub const fn channel<T>() -> OneshotChannel<T> {
-    OneshotChannel(UnsafeCell::new(Shared {
+    OneshotChannel(UnsafeCell::new(Slot {
         value: None,
         recv_waker: None,
         close_waker: None,
@@ -31,14 +31,14 @@ pub struct RecvError;
 ///
 /// This is useful for asynchronously handing a single value from one future to
 /// another.
-pub struct OneshotChannel<T>(UnsafeCell<Shared<T>>);
+pub struct OneshotChannel<T>(UnsafeCell<Slot<T>>);
 
 impl<T> OneshotChannel<T> {
     /// Splits the channel into borrowing [`SenderRef`] and [`ReceiverRef`]
     /// handles.
     pub fn split(&mut self) -> (SenderRef<'_, T>, ReceiverRef<'_, T>) {
-        let shared = &self.0;
-        (SenderRef { shared }, ReceiverRef { shared })
+        let slot = &self.0;
+        (SenderRef { slot }, ReceiverRef { slot })
     }
 
     #[cfg(feature = "alloc")]
@@ -49,29 +49,29 @@ impl<T> OneshotChannel<T> {
     /// [`split`](OneshotChannel::split), but avoids potential lifetime
     /// restrictions.
     pub fn into_split(self) -> (Sender<T>, Receiver<T>) {
-        let shared = Rc::new(self.0);
-        (Sender { shared: Rc::clone(&shared) }, Receiver { shared })
+        let slot = Rc::new(self.0);
+        (Sender { slot: Rc::clone(&slot) }, Receiver { slot })
     }
 }
 
 #[cfg(feature = "alloc")]
 /// An owning handle for sending an element through a split [`OneshotChannel`].
 pub struct Sender<T> {
-    shared: Rc<UnsafeCell<Shared<T>>>,
+    slot: Rc<UnsafeCell<Slot<T>>>,
 }
 
 #[cfg(feature = "alloc")]
 impl<T> Sender<T> {
     /// Returns `true` if the channel has been closed.
     pub fn is_closed(&self) -> bool {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.get()).closed }
+        // SAFETY: no mutable or aliased access to slot possible
+        unsafe { (*self.slot.get()).closed }
     }
 
     /// Polls the channel, resolving if the channel has been closed.
     pub fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.get()).poll_closed(cx) }
+        // SAFETY: no mutable or aliased access to slot possible
+        unsafe { (*self.slot.get()).poll_closed(cx) }
     }
 
     /// Resolves when the channel is closed.
@@ -85,16 +85,16 @@ impl<T> Sender<T> {
     ///
     /// Fails, if the channel is closed.
     pub fn send(self, value: T) -> Result<(), SendError<T>> {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.get()).send(value) }
+        // SAFETY: no mutable or aliased access to slot possible
+        unsafe { (*self.slot.get()).send(value) }
     }
 }
 
 #[cfg(feature = "alloc")]
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.get()).closed = true }
+        // SAFETY: no mutable or aliased access to slot possible
+        unsafe { (*self.slot.get()).closed = true }
     }
 }
 
@@ -104,8 +104,8 @@ where
     T: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // SAFETY: no mutable or aliased access to shared possible
-        let value = unsafe { &(*self.shared.get()).value };
+        // SAFETY: no mutable or aliased access to slot possible
+        let value = unsafe { &(*self.slot.get()).value };
         f.debug_struct("Sender")
             .field("is_closed", &self.is_closed())
             .field("value", value)
@@ -116,20 +116,20 @@ where
 /// A borrowing handle for sending an element through a split
 /// [`OneshotChannel`].
 pub struct SenderRef<'a, T> {
-    shared: &'a UnsafeCell<Shared<T>>,
+    slot: &'a UnsafeCell<Slot<T>>,
 }
 
 impl<'a, T> SenderRef<'a, T> {
     /// Returns `true` if the channel has been closed.
     pub fn is_closed(&self) -> bool {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.get()).closed }
+        // SAFETY: no mutable or aliased access to slot possible
+        unsafe { (*self.slot.get()).closed }
     }
 
     /// Polls the channel, resolving if the channel has been closed.
     pub fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.get()).poll_closed(cx) }
+        // SAFETY: no mutable or aliased access to slot possible
+        unsafe { (*self.slot.get()).poll_closed(cx) }
     }
 
     /// Resolves when the channel is closed.
@@ -143,15 +143,15 @@ impl<'a, T> SenderRef<'a, T> {
     ///
     /// Fails, if the channel is closed.
     pub fn send(self, value: T) -> Result<(), SendError<T>> {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.get()).send(value) }
+        // SAFETY: no mutable or aliased access to slot possible
+        unsafe { (*self.slot.get()).send(value) }
     }
 }
 
 impl<T> Drop for SenderRef<'_, T> {
     fn drop(&mut self) {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.get()).closed = true }
+        // SAFETY: no mutable or aliased access to slot possible
+        unsafe { (*self.slot.get()).closed = true }
     }
 }
 
@@ -160,8 +160,8 @@ where
     T: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // SAFETY: no mutable or aliased access to shared possible
-        let value = unsafe { &(*self.shared.get()).value };
+        // SAFETY: no mutable or aliased access to slot possible
+        let value = unsafe { &(*self.slot.get()).value };
         f.debug_struct("SenderRef")
             .field("is_closed", &self.is_closed())
             .field("value", value)
@@ -184,23 +184,23 @@ where
 /// # }
 /// ```
 pub struct Receiver<T> {
-    shared: Rc<UnsafeCell<Shared<T>>>,
+    slot: Rc<UnsafeCell<Slot<T>>>,
 }
 
 #[cfg(feature = "alloc")]
 impl<T> Receiver<T> {
     /// Returns `true` if the channel has been closed.
     pub fn is_closed(&self) -> bool {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.get()).closed }
+        // SAFETY: no mutable or aliased access to slot possible
+        unsafe { (*self.slot.get()).closed }
     }
 
     /// Closes the channel, causing any [`closed`](Sender::closed) or subsequent
     /// [`poll_closed`](Sender::poll_closed) calls to resolve and any subsequent
     /// [`send`s](Sender::send) to fail on the corresponding [`Sender`].
     pub fn close(&mut self) {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.get()).close_and_wake() }
+        // SAFETY: no mutable or aliased access to slot possible
+        unsafe { (*self.slot.get()).close_and_wake() }
     }
 
     /// Receives an element through the channel.
@@ -210,8 +210,8 @@ impl<T> Receiver<T> {
     /// Fails, if the channel is [empty](TryRecvError::Empty) or
     /// [disconnected](TryRecvError::Disconnected).
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.get()).try_recv() }
+        // SAFETY: no mutable or aliased access to slot possible
+        unsafe { (*self.slot.get()).try_recv() }
     }
 }
 
@@ -221,8 +221,8 @@ impl<T> Future for Receiver<T> {
     type Output = Result<T, RecvError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let shared = &self.get_mut().shared;
-        unsafe { (*shared.get()).poll_recv(cx) }
+        let slot = &self.get_mut().slot;
+        unsafe { (*slot.get()).poll_recv(cx) }
     }
 }
 
@@ -239,8 +239,8 @@ where
     T: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // SAFETY: no mutable or aliased access to shared possible
-        let value = unsafe { &(*self.shared.get()).value };
+        // SAFETY: no mutable or aliased access to slot possible
+        let value = unsafe { &(*self.slot.get()).value };
         f.debug_struct("Receiver")
             .field("is_closed", &self.is_closed())
             .field("value", value)
@@ -266,14 +266,14 @@ where
 /// # }
 /// ```
 pub struct ReceiverRef<'a, T> {
-    shared: &'a UnsafeCell<Shared<T>>,
+    slot: &'a UnsafeCell<Slot<T>>,
 }
 
 impl<T> ReceiverRef<'_, T> {
     /// Returns `true` if the channel has been closed.
     pub fn is_closed(&self) -> bool {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.get()).closed }
+        // SAFETY: no mutable or aliased access to slot possible
+        unsafe { (*self.slot.get()).closed }
     }
 
     /// Closes the channel, causing any [`closed`](SenderRef::closed) or
@@ -281,8 +281,8 @@ impl<T> ReceiverRef<'_, T> {
     /// any subsequent [`send`s](SenderRef::send) to fail on the corresponding
     /// [`SenderRef`].
     pub fn close(&mut self) {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.get()).close_and_wake() }
+        // SAFETY: no mutable or aliased access to slot possible
+        unsafe { (*self.slot.get()).close_and_wake() }
     }
 
     /// Receives an element through the channel.
@@ -292,8 +292,8 @@ impl<T> ReceiverRef<'_, T> {
     /// Fails, if the channel is [empty](TryRecvError::Empty) or
     /// [disconnected](TryRecvError::Disconnected).
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.get()).try_recv() }
+        // SAFETY: no mutable or aliased access to slot possible
+        unsafe { (*self.slot.get()).try_recv() }
     }
 }
 
@@ -301,9 +301,9 @@ impl<T> Future for ReceiverRef<'_, T> {
     type Output = Result<T, RecvError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let shared = self.get_mut().shared;
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { &mut *shared.get() }.poll_recv(cx)
+        let slot = self.get_mut().slot;
+        // SAFETY: no mutable or aliased access to slot possible
+        unsafe { &mut *slot.get() }.poll_recv(cx)
     }
 }
 
@@ -318,8 +318,8 @@ where
     T: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // SAFETY: no mutable or aliased access to shared possible
-        let value = unsafe { &(*self.shared.get()).value };
+        // SAFETY: no mutable or aliased access to slot possible
+        let value = unsafe { &(*self.slot.get()).value };
         f.debug_struct("ReceiverRef")
             .field("is_closed", &self.is_closed())
             .field("value", value)
@@ -329,7 +329,7 @@ where
 
 /// A shared underlying data structure for the internal state of a
 /// [`OneshotChannel`].
-struct Shared<T> {
+struct Slot<T> {
     // HINT: it's not worth squeezing all Option tags into a single byte and
     // using MaybeUninits instead. Source: I tried
     value: Option<T>,
@@ -338,7 +338,7 @@ struct Shared<T> {
     closed: bool,
 }
 
-impl<T> Shared<T> {
+impl<T> Slot<T> {
     fn send(&mut self, value: T) -> Result<(), SendError<T>> {
         // check, if channel has been closed
         if self.closed {

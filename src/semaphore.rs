@@ -296,7 +296,7 @@ impl Drop for Acquire<'_> {
     }
 }
 
-/// The shared [`Semaphore`] state.
+/// The shared [`Semaphore`] accounting state.
 struct Shared {
     /// The queue of registered `Waker`s.
     waiters: WaiterQueue,
