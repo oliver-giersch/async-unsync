@@ -222,6 +222,7 @@ impl<T> Future for Receiver<T> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let slot = &self.get_mut().slot;
+        // SAFETY: no mutable or aliased access to slot possible
         unsafe { (*slot.get()).poll_recv(cx) }
     }
 }

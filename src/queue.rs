@@ -220,7 +220,7 @@ impl<T> UnsyncQueue<T, Bounded> {
 
     pub(crate) fn unreserve(&self) {
         // SAFETY: no mutable or aliased access to queue possible
-        drop(unsafe { (*self.0.get()).extra.semaphore.make_permit(1) });
+        unsafe { (*self.0.get()).extra.semaphore.return_permits(1) }
     }
 
     #[cfg(test)]
@@ -441,8 +441,8 @@ where
     type Output = Option<T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // SAFETY: no mutable or aliased access to queue possible
         let queue = self.get_mut().queue;
+        // SAFETY: no mutable or aliased access to queue possible
         unsafe { (*queue.get()).poll_recv::<COUNTED>(cx) }
     }
 }
