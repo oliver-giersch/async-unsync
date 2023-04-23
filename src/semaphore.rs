@@ -78,6 +78,14 @@ impl Semaphore {
         shared.permits = shared.permits.saturating_sub(n);
     }
 
+    /// Returns `n` previously "forgotten" permits back to the semaphore.
+    ///
+    /// This method complements [`Permit::forget`] and has no other uses.
+    pub fn return_permits(&self, n: usize) {
+        // SAFETY: no mutable or aliased access to shared possible
+        unsafe { (*self.shared.get()).return_permits(n) }
+    }
+
     /// Acquires a single [`Permit`] or returns an [error](TryAcquireError), if
     /// there are no available permits.
     ///
@@ -118,12 +126,6 @@ impl Semaphore {
     /// Awaiting the [`Future`] fails, if the semaphore has been closed.
     pub fn acquire_many(&self, n: usize) -> Acquire<'_> {
         self.build_acquire(n)
-    }
-
-    /// Returns `n` previously "forgotten" permits back to the semaphore.
-    pub(crate) fn return_permits(&self, n: usize) {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.get()).return_permits(n) }
     }
 
     /// Returns an correctly initialized [`Acquire`] future instance for
