@@ -20,7 +20,7 @@ To use this crate, add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-async-unsync = "0.2.0"
+async-unsync = "0.2.1"
 ```
 
 [1]: https://docs.rs/tokio/latest/tokio/sync/index.html
