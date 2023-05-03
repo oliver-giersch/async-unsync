@@ -796,7 +796,9 @@ mod tests {
 
             core::future::poll_fn(|cx| {
                 assert!(fut.as_mut().poll(cx).is_ready());
-                assert!(fut.as_mut().poll(cx).is_pending());
+                // polling again after completion, works in this case, but might
+                // cause a Waker leak under other circumstances.
+                assert!(fut.as_mut().poll(cx).is_ready());
                 Poll::Ready(())
             })
             .await;
