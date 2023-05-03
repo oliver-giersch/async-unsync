@@ -33,3 +33,8 @@
 
 - Fixes a bug `Semaphore` that would not wake waiters on close.
 - Change `Semaphore::acquire[_many]` to return a named `Future` type.
+
+## Release `0.2.2`
+
+- Fixes a bug where a `Waker` registered by a `Semaphore` would not be dropped,
+  causing memory leaks.

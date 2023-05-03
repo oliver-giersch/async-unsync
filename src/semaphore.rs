@@ -6,7 +6,7 @@ use core::{
     fmt,
     future::Future,
     marker::PhantomPinned,
-    mem::{self, MaybeUninit},
+    mem,
     pin::Pin,
     ptr::{self, NonNull},
     task::{Context, Poll, Waker},
@@ -655,22 +655,26 @@ struct Waiter {
 ///
 /// `get` is only called during traversal of that list, so it is guaranteed to
 /// have been initialized
-struct LateInitWaker(UnsafeCell<MaybeUninit<Waker>>);
+struct LateInitWaker(UnsafeCell<Option<Waker>>);
 
 impl LateInitWaker {
     const fn new() -> Self {
-        Self(UnsafeCell::new(MaybeUninit::uninit()))
+        Self(UnsafeCell::new(None))
     }
 
     fn set(&self, waker: Waker) {
         // SAFETY: no mutable or aliased access to waker possible, writing the
         // waker is unproblematic due to the required liveness of the pointer.
-        unsafe { (*self.0.get()).as_mut_ptr().write(waker) };
+        // this is never called when there already is a waker
+        unsafe { self.0.get().write(Some(waker)) };
     }
 
     unsafe fn get(&self) -> &Waker {
-        // SAFETY: initness required as function invariant, no al
-        unsafe { (*self.0.get()).assume_init_ref() }
+        // SAFETY: initness required as function invariant
+        match &*self.0.get() {
+            Some(waker) => waker,
+            None => core::hint::unreachable_unchecked(),
+        }
     }
 }
 
@@ -715,6 +719,41 @@ mod tests {
     }
 
     #[test]
+    fn acquire_never() {
+        future::block_on(async {
+            let sem = super::Semaphore::new(0);
+            let mut fut = core::pin::pin!(sem.acquire());
+
+            core::future::poll_fn(|cx| {
+                assert!(fut.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+
+            assert_eq!(sem.available_permits(), 0);
+            assert_eq!(sem.outstanding_permits(), 0);
+        });
+    }
+
+    #[test]
+    fn acquire() {
+        future::block_on(async {
+            let sem = super::Semaphore::new(0);
+            let mut fut = core::pin::pin!(sem.acquire());
+            core::future::poll_fn(|cx| {
+                assert!(fut.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+
+            sem.add_permits(1);
+            let permit = fut.await.unwrap();
+            drop(permit);
+            assert_eq!(sem.available_permits(), 1);
+        });
+    }
+
+    #[test]
     fn acquire_one() {
         future::block_on(async {
             let sem = super::Semaphore::new(0);
@@ -739,6 +778,30 @@ mod tests {
             drop(permit);
             assert_eq!(sem.available_permits(), 2);
             assert_eq!(sem.outstanding_permits(), 0);
+        });
+    }
+
+    #[test]
+    fn poll_acquire_after_completion() {
+        future::block_on(async {
+            let sem = super::Semaphore::new(0);
+            let mut fut = core::pin::pin!(sem.acquire());
+            core::future::poll_fn(|cx| {
+                assert!(fut.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+
+            sem.add_permits(1);
+
+            core::future::poll_fn(|cx| {
+                assert!(fut.as_mut().poll(cx).is_ready());
+                assert!(fut.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+
+            assert_eq!(sem.available_permits(), 1);
         });
     }
 
