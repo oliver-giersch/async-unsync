@@ -22,12 +22,7 @@ impl Semaphore {
     /// Creates a new semaphore with the initial number of permits.
     pub const fn new(permits: usize) -> Self {
         Self {
-            shared: UnsafeCell::new(Shared {
-                waiters: WaiterQueue::new(),
-                permits,
-                outstanding_permits: 0,
-                closed: false,
-            }),
+            shared: UnsafeCell::new(Shared { waiters: WaiterQueue::new(), permits, closed: false }),
         }
     }
 
@@ -59,12 +54,6 @@ impl Semaphore {
         unsafe { (*self.shared.get()).permits }
     }
 
-    /// Returns the current number of handed out permits.
-    pub fn outstanding_permits(&self) -> usize {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.get()).outstanding_permits }
-    }
-
     /// Adds `n` new permits to the semaphore.
     pub fn add_permits(&self, n: usize) {
         // SAFETY: no mutable or aliased access to shared possible
@@ -76,14 +65,6 @@ impl Semaphore {
         // SAFETY: no mutable or aliased access to shared possible
         let shared = unsafe { &mut (*self.shared.get()) };
         shared.permits = shared.permits.saturating_sub(n);
-    }
-
-    /// Returns `n` previously "forgotten" permits back to the semaphore.
-    ///
-    /// This method complements [`Permit::forget`] and has no other uses.
-    pub fn return_permits(&self, n: usize) {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.get()).return_permits(n) }
     }
 
     /// Acquires a single [`Permit`] or returns an [error](TryAcquireError), if
@@ -175,8 +156,6 @@ impl<'a> Permit<'a> {
     ///
     /// This permanently reduces the number of available permits.
     pub fn forget(self) {
-        // SAFETY: no mutable or aliased access to shared possible
-        unsafe { (*self.shared.get()).outstanding_permits -= self.count };
         mem::forget(self);
     }
 }
@@ -185,7 +164,7 @@ impl Drop for Permit<'_> {
     fn drop(&mut self) {
         // SAFETY: no mutable or aliased access to shared possible
         let shared = unsafe { &mut (*self.shared.get()) };
-        shared.return_permits(self.count);
+        shared.add_permits(self.count);
     }
 }
 
@@ -297,7 +276,6 @@ impl Drop for Acquire<'_> {
         let permits = self.waiter.permits.get();
         // the order is important here, because `add_permits` may mark permits
         // as handed out again, if they are transfered to other waiters
-        shared.outstanding_permits -= permits;
         shared.add_permits(permits);
     }
 }
@@ -308,8 +286,6 @@ struct Shared {
     waiters: WaiterQueue,
     /// The number of currently available permits.
     permits: usize,
-    /// The number of currently outstanding permits.
-    outstanding_permits: usize,
     /// The flag indicating if the semaphore has been closed.
     closed: bool,
 }
@@ -347,13 +323,11 @@ impl Shared {
                     // the waiter gets all available permits & the loop
                     // terminated (n = 0)
                     waiter.permits.set(diff - n);
-                    self.outstanding_permits = self.outstanding_permits.saturating_add(diff - n);
                     return;
                 } else {
                     // the waiters request can be completed, assign all
                     // missing permits, wake the waiter, continue the loop
                     waiter.permits.set(waiter.wants);
-                    self.outstanding_permits = self.outstanding_permits.saturating_add(diff);
                     n -= diff;
 
                     // SAFETY: All wakers are initialized when the `Waiter`s
@@ -373,16 +347,6 @@ impl Shared {
         }
     }
 
-    fn return_permits(&mut self, n: usize) {
-        // underflow *would* be possible, since `Permit`s can be forgotten,
-        // which reduces outstanding permits and then be created again
-        // (internally) "out of thin air"; the order is important here, because
-        // `add_permits` may mark permits as handed out again, if they are
-        // transfered to other waiters
-        self.outstanding_permits = self.outstanding_permits.saturating_sub(n);
-        self.add_permits(n);
-    }
-
     /// Attempts to reduce available permits by up to `n` or returns an error,
     /// if the semaphore has been closed or has no available permits.
     fn try_acquire<const STRICT: bool>(&mut self, n: usize) -> Result<usize, TryAcquireError> {
@@ -398,12 +362,10 @@ impl Shared {
             // hand out all available permits
             let count = self.permits;
             self.permits = 0;
-            self.outstanding_permits = self.outstanding_permits.saturating_add(count);
             Ok(count)
         } else {
             // can not underflow because n <= permits
             self.permits -= n;
-            self.outstanding_permits = self.outstanding_permits.saturating_add(n);
             Ok(n)
         }
     }
@@ -666,11 +628,9 @@ mod tests {
         let p1 = sem.try_acquire().unwrap();
         let p2 = sem.try_acquire().unwrap();
         assert_eq!(sem.available_permits(), 0);
-        assert_eq!(sem.outstanding_permits(), 2);
 
         drop((p1, p2));
         assert_eq!(sem.available_permits(), 2);
-        assert_eq!(sem.outstanding_permits(), 0);
     }
 
     #[test]
@@ -682,10 +642,8 @@ mod tests {
         sem.add_permits(1);
         let permit = sem.try_acquire_many(3).unwrap();
         assert_eq!(permit.count, 3);
-        assert_eq!(sem.outstanding_permits(), 3);
         drop(permit);
         assert_eq!(sem.available_permits(), 3);
-        assert_eq!(sem.outstanding_permits(), 0);
     }
 
     #[test]
@@ -701,7 +659,6 @@ mod tests {
             .await;
 
             assert_eq!(sem.available_permits(), 0);
-            assert_eq!(sem.outstanding_permits(), 0);
         });
     }
 
@@ -736,7 +693,6 @@ mod tests {
                 // add 2 permits, one goes directly to the enqueued waiter and
                 // wakes it, one goes into the semaphore
                 sem.add_permits(2);
-                assert_eq!(sem.outstanding_permits(), 1);
                 Poll::Ready(())
             })
             .await;
@@ -744,10 +700,8 @@ mod tests {
             // future must resolve now, since it has been woken
             let permit = fut.await.unwrap();
             assert_eq!(sem.available_permits(), 1);
-            assert_eq!(sem.outstanding_permits(), 1);
             drop(permit);
             assert_eq!(sem.available_permits(), 2);
-            assert_eq!(sem.outstanding_permits(), 0);
         });
     }
 
@@ -795,7 +749,6 @@ mod tests {
         assert!(fut.as_mut().poll(&mut cx).is_pending());
         assert_eq!(sem.waiters(), 1);
         sem.add_permits(1);
-        assert_eq!(sem.outstanding_permits(), 1);
 
         assert!(fut.as_mut().poll(&mut cx).is_ready());
         drop(fut);
@@ -816,14 +769,12 @@ mod tests {
 
                 assert_eq!(sem.waiters(), 2);
                 sem.add_permits(1);
-                assert_eq!(sem.outstanding_permits(), 1);
 
                 // due to established order, f2 must not resolve before f1
                 assert!(f2.as_mut().poll(cx).is_pending());
 
                 // adding another permit must wake f1
                 sem.add_permits(1);
-                assert_eq!(sem.outstanding_permits(), 2);
                 assert_eq!(sem.waiters(), 1);
                 Poll::Ready(())
             })
@@ -832,22 +783,18 @@ mod tests {
             // f1 should resolve now
             let permit = f1.await.unwrap();
             assert_eq!(sem.waiters(), 1);
-            assert_eq!(sem.outstanding_permits(), 2);
 
             // dropping the permit must pass one permit to the next waiter,
             // wake it and return the other permit back to the semaphore
             drop(permit);
             assert_eq!(sem.waiters(), 0);
             assert_eq!(sem.available_permits(), 1);
-            assert_eq!(sem.outstanding_permits(), 1);
 
             let permit = f2.await.unwrap();
             assert_eq!(sem.available_permits(), 1);
-            assert_eq!(sem.outstanding_permits(), 1);
             drop(permit);
 
             assert_eq!(sem.available_permits(), 2);
-            assert_eq!(sem.outstanding_permits(), 0);
         });
     }
 
@@ -867,7 +814,6 @@ mod tests {
             // dropping the future should clear up its queue entry immediately
             drop(fut);
             assert_eq!(sem.waiters(), 0);
-            assert_eq!(sem.outstanding_permits(), 0);
 
             let mut fut = Box::pin(sem.acquire());
             // poll once to enqueue the future as waiting
@@ -885,7 +831,6 @@ mod tests {
             assert!(fut.await.is_err());
             assert_eq!(sem.waiters(), 0);
             assert_eq!(sem.available_permits(), 1);
-            assert_eq!(sem.outstanding_permits(), 0);
         });
     }
 
@@ -905,14 +850,12 @@ mod tests {
             // adding a permit will wake the Acquire future instead of
             // increasing the amount of available permits
             sem.add_permits(1);
-            assert_eq!(sem.outstanding_permits(), 1);
             // dropping the future should return the added permit instead of
             // removing the waker from the queue
             drop(fut);
 
             assert_eq!(sem.waiters(), 0);
             assert_eq!(sem.available_permits(), 1);
-            assert_eq!(sem.outstanding_permits(), 0);
         });
     }
 
@@ -921,7 +864,6 @@ mod tests {
         future::block_on(async {
             let sem = super::Semaphore::new(1);
             let permit = sem.acquire().await.unwrap();
-            assert_eq!(sem.outstanding_permits(), 1);
 
             let mut f1 = Box::pin(sem.acquire());
             let mut f2 = Box::pin(sem.acquire());
@@ -949,7 +891,6 @@ mod tests {
             // dropping the resolved future should have no effect
             drop(f1);
             assert_eq!(sem.available_permits(), 0);
-            assert_eq!(sem.outstanding_permits(), 1);
             // awaiting f2 must not deadlock, even if not polled manually
             assert!(f2.await.is_err());
 
@@ -957,7 +898,6 @@ mod tests {
             // been closed
             drop(permit);
             assert_eq!(sem.available_permits(), 1);
-            assert_eq!(sem.outstanding_permits(), 0);
 
             // no further permits must be acquirable
             assert!(sem.try_acquire().is_err());
@@ -979,7 +919,6 @@ mod tests {
             drop(permit);
             assert_eq!(sem.waiters(), 0);
             assert_eq!(sem.available_permits(), 0);
-            assert_eq!(sem.outstanding_permits(), 1);
 
             // closing by itself will not return the outstanding permit
             sem.close();

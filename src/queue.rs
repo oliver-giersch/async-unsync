@@ -1,5 +1,6 @@
 use core::{
     cell::UnsafeCell,
+    cmp,
     future::Future,
     pin::Pin,
     task::{Context, Poll, Waker},
@@ -98,7 +99,7 @@ impl<T> UnsyncQueue<T, Bounded> {
         assert_capacity(capacity);
         Self(UnsafeCell::new(Queue::new(
             VecDeque::new(),
-            Bounded { semaphore: Semaphore::new(capacity), max_capacity: capacity },
+            Bounded { semaphore: Semaphore::new(capacity), max_capacity: capacity, reserved: 0 },
         )))
     }
 
@@ -107,17 +108,22 @@ impl<T> UnsyncQueue<T, Bounded> {
         let initial = core::cmp::max(capacity, initial);
         Self(UnsafeCell::new(Queue::new(
             VecDeque::with_capacity(initial),
-            Bounded { semaphore: Semaphore::new(capacity), max_capacity: capacity },
+            Bounded { semaphore: Semaphore::new(capacity), max_capacity: capacity, reserved: 0 },
         )))
     }
 
     pub(crate) fn from_iter(capacity: usize, iter: impl IntoIterator<Item = T>) -> Self {
         assert_capacity(capacity);
         let queue = VecDeque::from_iter(iter);
+        let capacity = cmp::max(queue.len(), capacity);
         let initial_capacity = capacity.saturating_sub(queue.len());
         Self(UnsafeCell::new(Queue::new(
             queue,
-            Bounded { semaphore: Semaphore::new(initial_capacity), max_capacity: capacity },
+            Bounded {
+                semaphore: Semaphore::new(initial_capacity),
+                max_capacity: capacity,
+                reserved: 0,
+            },
         )))
     }
 
@@ -131,13 +137,9 @@ impl<T> UnsyncQueue<T, Bounded> {
         unsafe { (*self.0.get()).extra.semaphore.available_permits() }
     }
 
-    pub(crate) fn unbounded_send<const CAPACITY_REDUCING: bool>(&self, elem: T) {
+    pub(crate) fn unbounded_send(&self, elem: T) {
         // SAFETY: no mutable or aliased access to queue possible
         let queue = unsafe { &mut *self.0.get() };
-        if CAPACITY_REDUCING {
-            queue.extra.semaphore.remove_permits(1);
-        }
-
         queue.push_and_wake(elem);
     }
 
@@ -168,7 +170,7 @@ impl<T> UnsyncQueue<T, Bounded> {
         // SAFETY: no mutable or aliased access to queue possible (a mutable
         // reference **MUST NOT** be held across the await!)
         let Ok(permit) = unsafe { (*ptr).extra.semaphore.acquire() }.await else {
-            return Err(SendError(elem))
+            return Err(SendError(elem));
         };
 
         // Forgetting the permit permanently decreases the number of available
@@ -196,6 +198,7 @@ impl<T> UnsyncQueue<T, Bounded> {
         // avoid storing an additional (redundant) reference in the `Permit`
         // struct.
         permit.forget();
+        queue.extra.reserved += 1;
         Ok(())
     }
 
@@ -205,7 +208,7 @@ impl<T> UnsyncQueue<T, Bounded> {
         // SAFETY: no mutable or aliased access to queue possible (a mutable
         // reference **MUST NOT** be held across the await!)
         let Ok(permit) = unsafe { (*ptr).extra.semaphore.acquire() }.await else {
-            return Err(SendError(()))
+            return Err(SendError(()));
         };
 
         // Forgetting the permit permanently decreases the number of
@@ -215,18 +218,17 @@ impl<T> UnsyncQueue<T, Bounded> {
         // avoid storing an additional (redundant) reference in the `Permit`
         // struct.
         permit.forget();
+        unsafe { (*ptr).extra.reserved += 1 };
         Ok(())
     }
 
-    pub(crate) fn unreserve(&self) {
+    pub(crate) fn unreserve(&self, consumed: bool) {
         // SAFETY: no mutable or aliased access to queue possible
-        unsafe { (*self.0.get()).extra.semaphore.return_permits(1) }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn outstanding_permits(&self) -> usize {
-        // SAFETY: no mutable or aliased access to queue possible
-        unsafe { (*self.0.get()).extra.semaphore.outstanding_permits() }
+        let queue = unsafe { &mut (*self.0.get()) };
+        queue.extra.reserved -= 1;
+        if !consumed {
+            queue.extra.semaphore.add_permits(1);
+        }
     }
 }
 
@@ -373,18 +375,16 @@ impl<T> MaybeBoundedQueue for Queue<T, Bounded> {
             // an element exists in the channel, wake the next blocked
             // sender, if any, and return the element
             Some(elem) => {
-                self.extra.add_permit();
+                self.extra.semaphore.add_permits(1);
                 Ok(elem)
             }
             // the channel is empty, but may also have been closed already
             // we must also check, if there are outstanding reserved permits
             // before the queue can be assessed to be empty
-            None => {
-                match !self.extra.has_outstanding_permits() && self.mask.is_closed::<COUNTED>() {
-                    true => Err(TryRecvError::Disconnected),
-                    false => Err(TryRecvError::Empty),
-                }
-            }
+            None => match self.extra.reserved == 0 && self.mask.is_closed::<COUNTED>() {
+                true => Err(TryRecvError::Disconnected),
+                false => Err(TryRecvError::Empty),
+            },
         }
     }
 }
@@ -413,19 +413,8 @@ pub(crate) struct Bounded {
     semaphore: Semaphore,
     /// The channel's capacity.
     max_capacity: usize,
-}
-
-impl Bounded {
-    fn add_permit(&self) {
-        let permits = self.semaphore.available_permits() + self.semaphore.outstanding_permits();
-        if permits < self.max_capacity {
-            self.semaphore.add_permits(1);
-        }
-    }
-
-    fn has_outstanding_permits(&self) -> bool {
-        self.semaphore.available_permits() != self.max_capacity
-    }
+    /// The number of currently reserved capacity.
+    reserved: usize,
 }
 
 /// The [`Future`] for receiving an element through the channel.

@@ -57,12 +57,13 @@ impl<T> Channel<T> {
         Self { queue: BoundedQueue::with_capacity(capacity, initial) }
     }
 
-    /// Returns a new bounded channel with pre-queued elements.
+    /// Returns a new bounded channel with a given capacity and pre-queued
+    /// elements.
     ///
     /// The initial capacity will be the difference between `capacity` and the
     /// number of elements returned by the [`Iterator`].
-    /// The iterator may return more than `capacity` elements, but the channel's
-    /// capacity will never exceed the given `capacity`.
+    /// The total channel capacity will be the maximum of `capacity` and the
+    /// iterator's length.
     ///
     /// # Panics
     ///
@@ -213,29 +214,6 @@ impl<T> Channel<T> {
         self.queue.try_send::<UNCOUNTED>(elem)
     }
 
-    /// Sends a value through the channel, ignoring any capacity constraints.
-    ///
-    /// This will immediately enqueue `elem`, even if there are currently
-    /// senders waiting due to a lack of available capacity.
-    /// Care must be taken with unbounded sends, as they may undermine
-    /// assumptions about message ordering and the ability to apply
-    /// backpressure.
-    /// Alternatively, this can be thought of as a one-time capacity increase.
-    ///
-    /// # Errors
-    ///
-    /// Fails, if the queue is closed.
-    pub fn unbounded_send(&self, elem: T) -> Result<(), SendError<T>> {
-        const CAPACITY_REDUCING: bool = true;
-
-        if self.is_closed() {
-            return Err(SendError(elem));
-        }
-
-        self.queue.unbounded_send::<CAPACITY_REDUCING>(elem);
-        Ok(())
-    }
-
     /// Sends a value, potentially waiting until there is capacity.
     ///
     /// # Errors
@@ -377,29 +355,6 @@ impl<T> Sender<T> {
     /// Fails, if the queue is closed or there is no available capacity.
     pub fn try_send(&self, elem: T) -> Result<(), TrySendError<T>> {
         self.queue.try_send::<COUNTED>(elem)
-    }
-
-    /// Sends a value through the channel, ignoring any capacity constraints.
-    ///
-    /// This will immediately enqueue `elem`, even if there are currently
-    /// senders waiting due to a lack of available capacity.
-    /// Care must be taken with unbounded sends, as they may undermine
-    /// assumptions about message ordering and the ability to apply
-    /// backpressure.
-    /// Alternatively, this can be thought of as a one-time capacity increase.
-    ///
-    /// # Errors
-    ///
-    /// Fails, if the queue is closed.
-    pub fn unbounded_send(&self, elem: T) -> Result<(), SendError<T>> {
-        const CAPACITY_REDUCING: bool = true;
-
-        if self.is_closed() {
-            return Err(SendError(elem));
-        }
-
-        self.queue.unbounded_send::<CAPACITY_REDUCING>(elem);
-        Ok(())
     }
 
     /// Sends a value through the channel, potentially waiting until there is
@@ -642,29 +597,6 @@ impl<T> SenderRef<'_, T> {
     /// Fails, if the queue is closed or there is no available capacity.
     pub fn try_send(&self, elem: T) -> Result<(), TrySendError<T>> {
         self.queue.try_send::<COUNTED>(elem)
-    }
-
-    /// Sends a value through the channel, ignoring any capacity constraints.
-    ///
-    /// This will immediately enqueue `elem`, even if there are currently
-    /// senders waiting due to a lack of available capacity.
-    /// Care must be taken with unbounded sends, as they may undermine
-    /// assumptions about message ordering and the ability to apply
-    /// backpressure.
-    /// Alternatively, this can be thought of as a one-time capacity increase.
-    ///
-    /// # Errors
-    ///
-    /// Fails, if the queue is closed.
-    pub fn unbounded_send(&self, elem: T) -> Result<(), SendError<T>> {
-        const CAPACITY_REDUCING: bool = true;
-
-        if self.is_closed() {
-            return Err(SendError(elem));
-        }
-
-        self.queue.unbounded_send::<CAPACITY_REDUCING>(elem);
-        Ok(())
     }
 
     /// Sends a value through the channel, potentially blocking until there is
@@ -961,17 +893,15 @@ impl<T> Permit<'_, T> {
     /// immediately and the permit is consumed.
     /// This will succeed even if the channel has been closed.
     pub fn send(self, elem: T) {
-        // must not reduce capacity again (done during reservation)
-        const CAPACITY_REDUCING: bool = false;
-
-        self.queue.unbounded_send::<CAPACITY_REDUCING>(elem);
+        self.queue.unbounded_send(elem);
+        self.queue.unreserve(true);
         mem::forget(self);
     }
 }
 
 impl<T> Drop for Permit<'_, T> {
     fn drop(&mut self) {
-        self.queue.unreserve();
+        self.queue.unreserve(false);
     }
 }
 
@@ -996,11 +926,9 @@ impl<T> OwnedPermit<T> {
     /// Unlike [`Permit::send`], this method returns the [`Sender`] from which
     /// the [`OwnedPermit`] was reserved.
     pub fn send(mut self, elem: T) -> Sender<T> {
-        // must not reduce capacity again (done during reservation)
-        const CAPACITY_REDUCING: bool = false;
-
         let sender = self.sender.take().unwrap_or_else(|| unreachable!());
-        sender.queue.unbounded_send::<CAPACITY_REDUCING>(elem);
+        sender.queue.unbounded_send(elem);
+        sender.queue.unreserve(true);
         sender
     }
 }
@@ -1008,7 +936,7 @@ impl<T> OwnedPermit<T> {
 impl<T> Drop for OwnedPermit<T> {
     fn drop(&mut self) {
         if let Some(sender) = self.sender.take() {
-            sender.queue.unreserve();
+            sender.queue.unreserve(false);
         }
     }
 }
@@ -1305,7 +1233,6 @@ mod tests {
             let permit = tx.reserve().await.unwrap();
             assert_eq!(tx.capacity(), 0);
             assert_eq!(tx.max_capacity(), 1);
-            assert_eq!(tx.queue.outstanding_permits(), 0, "reservation forgets permit");
 
             rx.close();
             core::future::poll_fn(|cx| {
@@ -1358,12 +1285,12 @@ mod tests {
     #[test]
     fn from_iter() {
         future::block_on(async {
-            let chan = super::Channel::from_iter(3, [0, 1, 2, 3]);
+            let chan = super::Channel::from_iter(5, [0, 1, 2, 3]);
             assert_eq!(chan.recv().await, Some(0));
             assert_eq!(chan.recv().await, Some(1));
             assert_eq!(chan.recv().await, Some(2));
             assert_eq!(chan.recv().await, Some(3));
-            assert_eq!(chan.capacity(), 3);
+            assert_eq!(chan.capacity(), 5);
         });
     }
 
@@ -1404,66 +1331,6 @@ mod tests {
 
             assert_eq!(rx.recv().await, Some(-4));
             assert_eq!(tx.capacity(), 1);
-        });
-    }
-
-    #[test]
-    fn unbounded_send() {
-        future::block_on(async {
-            let mut chan = super::channel::<i32>(1);
-            let (tx, mut rx) = chan.split();
-
-            assert!(tx.send(-1).await.is_ok());
-            assert_eq!(tx.capacity(), 0);
-
-            let mut f1 = Box::pin(tx.send(-2));
-            let mut f2 = Box::pin(tx.send(-3));
-            let mut f3 = Box::pin(tx.reserve());
-
-            core::future::poll_fn(|cx| {
-                assert!(f1.as_mut().poll(cx).is_pending());
-                assert!(f2.as_mut().poll(cx).is_pending());
-                assert!(f3.as_mut().poll(cx).is_pending());
-                assert_eq!(tx.capacity(), 0); // logically -3
-
-                Poll::Ready(())
-            })
-            .await;
-
-            assert!(tx.unbounded_send(-99).is_ok());
-            assert!(tx.unbounded_send(-99).is_ok());
-            assert!(tx.unbounded_send(-99).is_ok());
-            assert_eq!(tx.capacity(), 0);
-
-            assert_eq!(rx.recv().await, Some(-1));
-            assert_eq!(tx.capacity(), 0, "capacity goes to f1");
-            assert_eq!(tx.queue.outstanding_permits(), 1);
-
-            assert_eq!(rx.recv().await, Some(-99));
-            assert_eq!(rx.recv().await, Some(-99));
-            assert_eq!(tx.capacity(), 0, "capacity goes to f1");
-            assert_eq!(tx.queue.outstanding_permits(), 1);
-
-            assert!(f1.await.is_ok());
-            assert_eq!(tx.capacity(), 0, "capacity goes to f2");
-
-            // capacity saturates at 1, is owned "in limbo" by f2
-            assert_eq!(rx.recv().await, Some(-99));
-            assert_eq!(rx.recv().await, Some(-2));
-
-            assert_eq!(tx.queue.outstanding_permits(), 1);
-            assert_eq!(tx.capacity(), 0, "capacity goes to f3");
-
-            drop(f2);
-            assert_eq!(tx.capacity(), 0, "capacity goes to f3");
-            assert_eq!(tx.queue.outstanding_permits(), 1);
-
-            f3.await.unwrap().send(-4);
-            assert_eq!(tx.capacity(), 0);
-
-            assert_eq!(rx.recv().await, Some(-4));
-            assert_eq!(tx.capacity(), 1);
-            assert_eq!(tx.queue.outstanding_permits(), 0);
         });
     }
 }

@@ -38,3 +38,13 @@
 
 - Fixes a bug where a `Waker` registered by a `Semaphore` would not be dropped,
   causing memory leaks.
+
+## Release `0.3.0`
+
+- Performance improvements to `Semaphore`.
+
+### Breaking Changes
+
+- Removes `bound::[Channel|Sender|SenderRef]::unbounded_send`
+- Removes `Semaphore::outstanding_permits` and `Semaphore::return_permits`
+- Alters the behaviour of `bounded::Channel::from_iter` to use the maximum of the iterator's length and the given capacity as the channel's capacity.

@@ -33,3 +33,15 @@ test uncontented_unbounded_unsync ... bench:      17,078 ns/iter (+/- 874)
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 4 measured; 0 filtered out; finished in 16.17s
 ```
+
+Version `0.3.0`:
+
+```
+running 4 tests
+test uncontented_bounded_sync     ... bench:     340,491 ns/iter (+/- 16,329)
+test uncontented_bounded_unsync   ... bench:      51,252 ns/iter (+/- 1,413)
+test uncontented_unbounded_sync   ... bench:     215,017 ns/iter (+/- 11,349)
+test uncontented_unbounded_unsync ... bench:      17,753 ns/iter (+/- 847)
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 4 measured; 0 filtered out; finished in 5.71s
+```
