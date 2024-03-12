@@ -1025,7 +1025,7 @@ mod tests {
 
     use futures_lite::future;
 
-    use crate::{alloc::boxed::Box, queue::RecvFuture};
+    use crate::queue::RecvFuture;
 
     #[test]
     fn recv_split() {

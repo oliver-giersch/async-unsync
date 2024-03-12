@@ -22,7 +22,6 @@
 
 #[cfg(feature = "std")]
 mod alloc {
-    pub use std::boxed;
     pub use std::collections;
     pub use std::rc;
 }
