@@ -112,18 +112,7 @@ impl Semaphore {
     /// Returns an correctly initialized [`Acquire`] future instance for
     /// acquiring `wants` permits.
     fn build_acquire(&self, wants: usize) -> Acquire<'_> {
-        Acquire {
-            shared: &self.shared,
-            waiter: Waiter {
-                wants,
-                waker: LateInitWaker::new(),
-                state: Cell::new(WaiterState::Inert),
-                permits: Cell::new(0),
-                next: Cell::new(ptr::null()),
-                prev: Cell::new(ptr::null()),
-                _marker: PhantomPinned,
-            },
-        }
+        Acquire { shared: &self.shared, waiter: Waiter::new(wants) }
     }
 }
 
@@ -232,6 +221,7 @@ pub struct Acquire<'a> {
 impl<'a> Future for Acquire<'a> {
     type Output = Result<Permit<'a>, AcquireError>;
 
+    #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // SAFETY: The `Acquire` future can not be moved before being dropped
         let waiter = unsafe { Pin::map_unchecked(self.as_ref(), |acquire| &acquire.waiter) };
@@ -292,6 +282,7 @@ struct Shared {
 
 impl Shared {
     /// Closes the semaphore and notifies all remaining waiters.
+    #[cold]
     fn close(&mut self) -> usize {
         // SAFETY: non-live waiters di not exist in queue, no aliased access
         // possible
@@ -415,10 +406,10 @@ impl Shared {
         waiter.waker.set(cx.waker().clone());
         // SAFETY: All waiters remain valid while they are enqueued.
         //
-        // Each `Acquire` future contains/owns a `Waiter` and may either live on
-        // the stack or the heap.
-        // Each future must be pinned before it can be polled and therefore both
-        // the future and the waiter will remain in-place for their entire
+        // Each `Acquire` future contains (owns) a `Waiter` and may either live
+        // on the stack or the heap.
+        // Each future *must* be pinned before it can be polled and therefore
+        // both the future and the waiter will remain in-place for their entire
         // lifetime.
         // When the future/waiter are cancelled or dropped, they will dequeue
         // themselves to ensure no iteration over freed data is possible.
@@ -455,7 +446,10 @@ impl WaiterQueue {
     /// # Safety
     ///
     /// All pointers must reference valid, live and non-aliased `Waiter`s.
+    #[cold]
     unsafe fn len(&self) -> usize {
+        // this is only used in the [`Debug`] implementation, so counting each
+        // waiter one by one here is irrelevant to performance
         let mut curr = self.head;
         let mut waiting = 0;
         while !curr.is_null() {
@@ -492,6 +486,7 @@ impl WaiterQueue {
     /// # Safety
     ///
     /// All pointers must reference valid, live and non-aliased `Waiter`s.
+    #[cold]
     unsafe fn try_remove(&mut self, waiter: &Waiter) {
         let prev = waiter.prev.get();
         if prev.is_null() {
@@ -516,6 +511,7 @@ impl WaiterQueue {
     ///
     /// All pointers must reference valid, live and non-aliased `Waiter`s and
     /// `head` must be the current queue head.
+    #[inline]
     unsafe fn pop_front(&mut self, head: &Waiter) {
         self.head = head.next.get();
         if self.head.is_null() {
@@ -525,6 +521,7 @@ impl WaiterQueue {
         }
     }
 
+    #[cold]
     unsafe fn wake_all(&mut self) -> usize {
         let mut curr = self.head;
         let mut woken = 0;
@@ -567,6 +564,20 @@ struct Waiter {
     // see: https://gist.github.com/Darksonn/1567538f56af1a8038ecc3c664a42462
     // this marker lets miri pass the self-referential nature of this struct
     _marker: PhantomPinned,
+}
+
+impl Waiter {
+    const fn new(wants: usize) -> Self {
+        Self {
+            wants,
+            waker: LateInitWaker::new(),
+            state: Cell::new(WaiterState::Inert),
+            permits: Cell::new(0),
+            next: Cell::new(ptr::null()),
+            prev: Cell::new(ptr::null()),
+            _marker: PhantomPinned,
+        }
+    }
 }
 
 /// The current state of a [`Waiter`].

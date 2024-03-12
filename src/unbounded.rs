@@ -89,6 +89,7 @@ impl<T> UnboundedChannel<T> {
     }
 
     /// Closes the channel, ensuring that all subsequent sends will fail.
+    #[cold]
     pub fn close(&self) {
         self.queue.close::<UNCOUNTED>();
     }
@@ -301,6 +302,7 @@ pub struct UnboundedReceiver<T> {
 
 impl<T> UnboundedReceiver<T> {
     /// Closes the channel, ensuring that all subsequent sends will fail.
+    #[cold]
     pub fn close(&mut self) {
         self.queue.close::<COUNTED>();
     }
@@ -371,6 +373,7 @@ pub struct UnboundedReceiverRef<'a, T> {
 
 impl<T> UnboundedReceiverRef<'_, T> {
     /// Closes the channel, ensuring that all subsequent sends will fail.
+    #[cold]
     pub fn close(&mut self) {
         self.queue.close::<COUNTED>();
     }

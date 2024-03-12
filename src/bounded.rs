@@ -22,18 +22,14 @@ pub const fn channel<T>(capacity: usize) -> Channel<T> {
     Channel { queue: BoundedQueue::new(capacity) }
 }
 
-/// Returns a new bounded channel with pre-queued elements.
+/// Returns a new bounded channel with pre-queued items.
 ///
-/// The initial capacity will be the difference between `capacity` and the
-/// number of elements returned by the [`Iterator`].
-/// The iterator may return more than `capacity` elements, but the channel's
-/// capacity will never exceed the given `capacity`.
-///
-/// # Panics
-///
-/// Panics, if `capacity` is zero.
-pub fn channel_from_iter<T>(capacity: usize, iter: impl IntoIterator<Item = T>) -> Channel<T> {
-    Channel::from_iter(capacity, iter)
+/// The channel's (total) capacity will be the maximum of `minimum_capacity` and
+/// the number of items returned by `iter`.
+/// Its initial available capacity will be the difference between its total
+/// capacity and the number of pre-queued items.
+pub fn channel_from_iter<T>(min_capacity: usize, iter: impl IntoIterator<Item = T>) -> Channel<T> {
+    Channel::from_iter(min_capacity, iter)
 }
 
 /// An unsynchronized (`!Sync`), asynchronous and bounded channel.
@@ -956,6 +952,12 @@ mod tests {
     use crate::queue::RecvFuture;
 
     #[test]
+    #[should_panic]
+    fn channel_panic() {
+        let _ = super::channel::<i32>(0);
+    }
+
+    #[test]
     fn recv_split() {
         future::block_on(async {
             let mut chan = super::channel::<i32>(4);
@@ -1283,7 +1285,13 @@ mod tests {
     }
 
     #[test]
-    fn from_iter() {
+    fn from_iter_less() {
+        let chan = super::channel_from_iter(0, &[0, 1, 2, 3]);
+        assert_eq!(chan.capacity(), 0);
+    }
+
+    #[test]
+    fn from_iter_more() {
         future::block_on(async {
             let chan = super::Channel::from_iter(5, [0, 1, 2, 3]);
             assert_eq!(chan.recv().await, Some(0));

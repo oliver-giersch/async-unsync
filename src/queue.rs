@@ -113,10 +113,10 @@ impl<T> UnsyncQueue<T, Bounded> {
     }
 
     pub(crate) fn from_iter(capacity: usize, iter: impl IntoIterator<Item = T>) -> Self {
-        assert_capacity(capacity);
         let queue = VecDeque::from_iter(iter);
         let capacity = cmp::max(queue.len(), capacity);
-        let initial_capacity = capacity.saturating_sub(queue.len());
+        let initial_capacity = capacity - queue.len();
+
         Self(UnsafeCell::new(Queue::new(
             queue,
             Bounded {
@@ -307,6 +307,7 @@ impl<T, B> Queue<T, B>
 where
     Self: MaybeBoundedQueue<Item = T>,
 {
+    #[cold]
     pub(crate) fn set_counted(&mut self) {
         self.reset();
         self.waker = None;
@@ -338,6 +339,7 @@ impl<T> MaybeBoundedQueue for Queue<T, Unbounded> {
 
     fn reset(&mut self) {}
 
+    #[cold]
     fn close<const COUNTED: bool>(&mut self) {
         self.mask.close::<COUNTED>();
     }
@@ -357,6 +359,7 @@ impl<T> MaybeBoundedQueue for Queue<T, Unbounded> {
 impl<T> MaybeBoundedQueue for Queue<T, Bounded> {
     type Item = T;
 
+    #[cold]
     fn reset(&mut self) {
         // this can never underflow, because `permits` is never increased above
         // the specified `max_capacity`
@@ -364,6 +367,7 @@ impl<T> MaybeBoundedQueue for Queue<T, Bounded> {
         self.extra.semaphore.add_permits(diff);
     }
 
+    #[cold]
     fn close<const COUNTED: bool>(&mut self) {
         // must also close semaphore in order to notify all waiting senders
         self.mask.close::<COUNTED>();
